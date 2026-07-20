@@ -1,17 +1,8 @@
 import path from "node:path";
 import { writeFileSync } from "node:fs";
 import { run, ensureDir } from "./download.js";
-import type { ClipPlan, CaptionStyle } from "../jobs.js";
-
-/** ASS style templates — the "templated edits" chosen automatically per clip. */
-const STYLES: Record<CaptionStyle, string> = {
-  pop: `Style: Cap,Arial Black,64,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,5,2,2,60,60,260,1
-Style: Hook,Arial Black,78,&H0000D7FF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,6,3,8,60,60,120,1`,
-  minimal: `Style: Cap,Arial,52,&H00FFFFFF,&H000000FF,&H00000000,&HB4000000,0,0,0,0,100,100,0,0,3,0,0,2,80,80,220,1
-Style: Hook,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&HB4000000,-1,0,0,0,100,100,0,0,3,0,0,8,80,80,120,1`,
-  hype: `Style: Cap,Arial Black,70,&H0000FFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,6,3,2,50,50,280,1
-Style: Hook,Arial Black,84,&H0000FFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,7,4,8,50,50,120,1`,
-};
+import type { ClipPlan } from "../jobs.js";
+import { splitWordsWithTiming, buildWordOverrideTags, buildStyleLine } from "./captions.js";
 
 function assTime(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -25,23 +16,31 @@ function esc(t: string) {
   return t.replace(/\\/g, "\\\\").replace(/\{/g, "(").replace(/\}/g, ")").replace(/\n/g, " ");
 }
 
-/** Build an .ass subtitle file for one clip (captions + 2s opening hook). */
+/** Build an .ass subtitle file for one clip (word-level captions + 2s opening hook). */
 export function buildAss(plan: ClipPlan, outPath: string) {
   const dur = plan.end - plan.start;
   const events: string[] = [];
+  const fontsize = plan.captionPalette === "news-serious" ? 58 : 72;
 
   // opening hook with a pop-in scale animation
   events.push(
     `Dialogue: 1,${assTime(0)},${assTime(Math.min(2.2, dur))},Hook,,0,0,0,,{\\fad(120,150)\\t(0,180,\\fscx110\\fscy110)\\t(180,320,\\fscx100\\fscy100)}${esc(plan.hook)}`
   );
 
-  for (const c of plan.captions) {
-    const start = Math.max(0, Math.min(c.start, dur));
-    const end = Math.max(start + 0.2, Math.min(c.end, dur));
-    events.push(
-      `Dialogue: 0,${assTime(start)},${assTime(end)},Cap,,0,0,0,,{\\fad(60,60)}${esc(c.text)}`
-    );
+  for (const group of plan.captions) {
+    const start = Math.max(0, Math.min(group.start, dur));
+    const end = Math.max(start + 0.2, Math.min(group.end, dur));
+    const words = splitWordsWithTiming({ start, end, text: group.text });
+    for (const w of words) {
+      const tags = buildWordOverrideTags(w, plan.captionAnimation, plan.captionPalette);
+      events.push(
+        `Dialogue: 0,${assTime(w.start)},${assTime(w.end)},Cap,,0,0,0,,${tags}${esc(w.word)}`
+      );
+    }
   }
+
+  const capStyle = buildStyleLine(plan.captionPalette, plan.captionFont, fontsize);
+  const hookStyle = `Style: Hook,${plan.captionFont},${fontsize + 14},&H0000D7FF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,6,3,8,60,60,120,1`;
 
   const ass = `[Script Info]
 ScriptType: v4.00+
@@ -51,7 +50,8 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-${STYLES[plan.captionStyle] ?? STYLES.pop}
+${capStyle}
+${hookStyle}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
