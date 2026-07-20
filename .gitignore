@@ -1,6 +1,7 @@
 node_modules/
 storage/
-fonts/
+fonts/*
+!fonts/Anton.ttf
 .env
 *.log
 dist/
