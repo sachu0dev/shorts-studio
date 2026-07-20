@@ -1,0 +1,6 @@
+node_modules/
+storage/
+fonts/
+.env
+*.log
+dist/
