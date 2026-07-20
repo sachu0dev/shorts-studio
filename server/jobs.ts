@@ -1,23 +1,73 @@
 import { EventEmitter } from "node:events";
 import { nanoid } from "nanoid";
 
-export type CaptionStyle = "pop" | "minimal" | "hype";
+export type ContentMode = "funny" | "gaming" | "political";
+
+export type CaptionAnimation =
+  | "karaoke-reveal"
+  | "punch-scale-bounce"
+  | "typewriter"
+  | "slide-up"
+  | "shake"
+  | "glitch-rgb-split";
+
+export type CaptionPalette =
+  | "gaming-neon"
+  | "meme-comic"
+  | "news-serious"
+  | "hype-yellow"
+  | "pop-white-red"
+  | "minimal-clean";
+
+export type LayoutTemplate =
+  | "fullscreen"
+  | "blurred-fill"
+  | "meme-corner"
+  | "zoom-punch"
+  | "shake-on-beat"
+  | "speed-ramp"
+  | "vignette-pulse"
+  | "glitch-cut"
+  | "color-grade-pop"
+  | "split-screen-duo"
+  | "letterbox-cinematic"
+  | "freeze-frame-callout";
+
+export type MemeDisplayMode =
+  | "corner-overlay"
+  | "full-cutaway"
+  | "pip-bounce"
+  | "sticker-pop"
+  | "side-by-side-split";
+
+export interface MemeOverlay {
+  start: number;   // seconds, relative to clip start
+  end: number;
+  query: string;   // Tenor search term
+  display: MemeDisplayMode;
+}
 
 export type AiProvider = "anthropic" | "openai" | "gemini";
 
 export interface ClipPlan {
   index: number;
-  title: string;            // shorts title (<=90 chars)
-  hook: string;             // first-2-seconds on-screen hook text
-  start: number;            // seconds in source video
-  end: number;              // seconds in source video
-  reason: string;           // why this clip was picked (trend-aware)
-  script: string;           // narration/voiceover-style script of the clip
+  title: string;
+  hook: string;
+  start: number;
+  end: number;
+  reason: string;
+  script: string;
   hashtags: string[];
-  captionStyle: CaptionStyle;
-  thumbnailText: string;    // <=5 words, punchy
-  thumbnailTimestamp: number; // best frame (seconds) for thumbnail
-  captions: { start: number; end: number; text: string }[]; // relative to clip start
+  thumbnailText: string;
+  thumbnailTimestamp: number;
+  captions: { start: number; end: number; text: string }[]; // text may contain **punch words**
+  contentMode: ContentMode;
+  captionAnimation: CaptionAnimation;
+  captionPalette: CaptionPalette;
+  captionFont: string;              // Google Fonts family name, AI-chosen
+  layoutTemplate: LayoutTemplate;
+  memes: MemeOverlay[];
+  monetizationFlag: { risky: boolean; reasons: string[] };
 }
 
 export interface Job {
@@ -27,6 +77,7 @@ export interface Job {
   clipCount: number;
   aiProvider: AiProvider;
   description: string;      // user-supplied context: trends, memes, instructions
+  controversialMode: boolean; // default false — safe clip-selection bias
   status: "queued" | "running" | "done" | "error";
   stage: string;
   log: string[];
@@ -48,6 +99,7 @@ export function createJob(input: {
   clipCount: number;
   aiProvider: AiProvider;
   description: string;
+  controversialMode: boolean;
 }): Job {
   const job: Job = {
     id: nanoid(10),
