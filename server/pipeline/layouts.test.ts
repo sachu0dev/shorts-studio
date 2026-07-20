@@ -65,3 +65,8 @@ test("meme overlay filter respects the start/end timing window", () => {
   const filter = buildMemeOverlayFilter(sampleMeme("corner-overlay"), "[meme0]", "[base]", "[out0]");
   assert.match(filter, /enable='between\(t,1,3\)'/);
 });
+
+test("side-by-side-split also respects its start/end timing window (not the full clip)", () => {
+  const filter = buildMemeOverlayFilter(sampleMeme("side-by-side-split"), "[meme0]", "[base]", "[out0]");
+  assert.match(filter, /enable='between\(t,1,3\)'/);
+});

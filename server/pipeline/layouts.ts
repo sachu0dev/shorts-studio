@@ -21,6 +21,9 @@ export function buildLayoutFilter(template: LayoutTemplate, plan: ClipPlan): str
     case "shake-on-beat":
       return "crop=iw-20:ih-20:10+5*sin(t*30):10+5*cos(t*30)";
     case "speed-ramp":
+      // ponytail: video-only setpts desyncs audio during the ramp window (known limitation).
+      // Upgrade path: apply a matching atempo filter to the audio stream keyed to the same
+      // mod(T,10)<1 windows so audio speed tracks the video ramp.
       return "setpts=if(lt(mod(T\\,10)\\,1)\\,2.0*PTS\\,PTS)";
     case "vignette-pulse":
       return "vignette=PI/4+0.1*sin(t*3)";
@@ -67,7 +70,10 @@ export function buildMemeOverlayFilter(
     case "sticker-pop":
       return `${memeLabel}scale=360:-1[m];${baseLabel}[m]overlay=x='(W-w)/2':y='H*0.3':${window}${outputLabel}`;
     case "side-by-side-split":
-      return `${memeLabel}scale=540:1920[m];${baseLabel}crop=540:1920:0:0[left];[left][m]hstack${outputLabel}`;
+      // ponytail: hstack has no timeline/enable support, so a true split would need the
+      // meme input gated with trim/setpts instead. Using overlay (which does support
+      // enable) on the right half gets correct [start,end] windowing in one line.
+      return `${memeLabel}scale=540:1920[m];${baseLabel}[m]overlay=540:0:${window}${outputLabel}`;
     default:
       return `${baseLabel}copy${outputLabel}`;
   }
