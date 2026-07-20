@@ -5,3 +5,4 @@ fonts/
 *.log
 dist/
 .superpowers/
+*.zip
