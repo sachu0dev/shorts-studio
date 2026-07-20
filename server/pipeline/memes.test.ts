@@ -43,3 +43,28 @@ test("fetchMemeAsset returns null on network failure", async () => {
   const result = await fetchMemeAsset("shocked cat", { destDir: dir, apiKey: "fake-key", fetchFn: fakeFetch });
   assert.equal(result, null);
 });
+
+test("fetchMemeAsset returns null when search endpoint returns non-ok status", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "memes-test-"));
+  const fakeFetch = (async () => new Response("rate limited", { status: 429 })) as unknown as typeof fetch;
+  const result = await fetchMemeAsset("shocked cat", { destDir: dir, apiKey: "fake-key", fetchFn: fakeFetch });
+  assert.equal(result, null);
+});
+
+test("fetchMemeAsset returns null when mp4 download returns non-ok status", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "memes-test-"));
+  const fakeFetch = (async (url: string) => {
+    if (url.includes("tenor.googleapis.com")) {
+      return new Response(JSON.stringify({
+        results: [{ media_formats: { mp4: { url: "https://tenor.example/clip.mp4" } } }],
+      }));
+    }
+    if (url === "https://tenor.example/clip.mp4") {
+      return new Response("not found", { status: 404 });
+    }
+    throw new Error("unexpected url " + url);
+  }) as unknown as typeof fetch;
+
+  const result = await fetchMemeAsset("shocked cat", { destDir: dir, apiKey: "fake-key", fetchFn: fakeFetch });
+  assert.equal(result, null);
+});

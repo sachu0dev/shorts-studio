@@ -25,11 +25,13 @@ export async function fetchMemeAsset(query: string, opts: FetchMemeOpts = {}): P
     const searchRes = await fetchFn(
       `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=${apiKey}&limit=1&media_filter=mp4`
     );
+    if (!searchRes.ok) return null;
     const data = await searchRes.json() as { results?: { media_formats?: { mp4?: { url: string } } }[] };
     const mp4Url = data.results?.[0]?.media_formats?.mp4?.url;
     if (!mp4Url) return null;
 
     const fileRes = await fetchFn(mp4Url);
+    if (!fileRes.ok) return null;
     const bytes = new Uint8Array(await fileRes.arrayBuffer());
     const outPath = path.join(destDir, `${nanoid(8)}.mp4`);
     writeFileSync(outPath, bytes);
