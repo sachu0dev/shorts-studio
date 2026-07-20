@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Shorts Studio — AI-Powered Shorts Pipeline</title>
+<meta name="description" content="Paste a YouTube URL and let AI pick the best clips, write scripts, generate captions and thumbnails — automatically. Supports Claude, GPT-4o and Gemini." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --ink:        #080c14;
+    --panel:      #101624;
+    --panel-2:    #151d2e;
+    --panel-3:    #1c2539;
+    --line:       #222f48;
+    --line-hover: #2e3f5e;
+    --text:       #e8ecf5;
+    --muted:      #7d8aaa;
+    --saffron:    #ff9933;
+    --saffron-2:  #e07b12;
+    --saffron-glow: rgba(255,153,51,.18);
+    --ok:         #3ee87b;
+    --err:        #ff5151;
+    --purple:     #a78bfa;
+    --blue:       #38bdf8;
+    --green:      #34d399;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--ink);
+    color: var(--text);
+    font-family: "Space Grotesk", system-ui, sans-serif;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(ellipse 60% 40% at 70% -10%, rgba(255,153,51,.07) 0%, transparent 70%),
+      radial-gradient(ellipse 50% 30% at 10% 90%, rgba(167,139,250,.06) 0%, transparent 60%);
+  }
+
+  .display { font-family: "Anton", sans-serif; letter-spacing: .03em; text-transform: uppercase; }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 24px 36px 20px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255,153,51,.04) 0%, transparent 100%);
+  }
+  header h1 { font-size: 28px; line-height: 1; }
+  header h1 em { font-style: normal; color: var(--saffron); }
+  .badge {
+    background: var(--saffron-glow); border: 1px solid rgba(255,153,51,.3);
+    color: var(--saffron); font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    padding: 3px 10px; border-radius: 999px; text-transform: uppercase;
+  }
+  header .tagline { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+  main { max-width: 1160px; margin: 0 auto; padding: 32px 24px 100px; }
+
+  /* ── Intake card ── */
+  .intake {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 26px;
+    display: grid;
+    gap: 20px;
+    box-shadow: 0 4px 40px rgba(0,0,0,.4);
+  }
+
+  .section-label {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .09em;
+    font-weight: 600; display: block; margin-bottom: 6px;
+  }
+
+  /* URL + clips + button row */
+  .row-main { display: grid; grid-template-columns: 1fr 120px auto; gap: 12px; align-items: end; }
+
+  input[type=url], input[type=number], textarea, select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font: inherit;
+    font-size: 15px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--saffron);
+    box-shadow: 0 0 0 3px var(--saffron-glow);
+  }
+  textarea {
+    resize: vertical;
+    min-height: 140px;
+    line-height: 1.55;
+    font-size: 14px;
+  }
+  textarea::placeholder { color: var(--muted); }
+  select option { background: var(--panel-2); }
+
+  /* AI provider pills */
+  .provider-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .provider-pill {
+    display: flex; align-items: center; gap: 7px;
+    padding: 9px 16px; border-radius: 10px; border: 1.5px solid var(--line);
+    background: var(--panel-2); color: var(--muted); cursor: pointer;
+    font: 600 13px "Space Grotesk", sans-serif;
+    transition: border-color .15s, color .15s, background .15s;
+    user-select: none;
+  }
+  .provider-pill:hover { border-color: var(--line-hover); color: var(--text); }
+  .provider-pill input[type=radio] { display: none; }
+  .provider-pill.active-anthropic { border-color: #c084fc; color: #c084fc; background: rgba(192,132,252,.1); }
+  .provider-pill.active-openai    { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.1); }
+  .provider-pill.active-gemini    { border-color: #38bdf8; color: #38bdf8; background: rgba(56,189,248,.1); }
+  .provider-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot-anthropic { background: #c084fc; }
+  .dot-openai    { background: #4ade80; }
+  .dot-gemini    { background: #38bdf8; }
+
+  /* Go button */
+  button.go {
+    font-family: "Anton", sans-serif; text-transform: uppercase; letter-spacing: .06em;
+    background: var(--saffron); color: #1a0800; border: 0; border-radius: 10px;
+    padding: 13px 24px; font-size: 16px; cursor: pointer; white-space: nowrap;
+    transition: background .15s, transform .1s, box-shadow .15s;
+    box-shadow: 0 4px 20px rgba(255,153,51,.3);
+  }
+  button.go:hover { background: var(--saffron-2); transform: translateY(-1px); box-shadow: 0 6px 28px rgba(255,153,51,.4); }
+  button.go:active { transform: translateY(0); }
+  button.go:disabled { opacity: .45; cursor: wait; transform: none; box-shadow: none; }
+
+  .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12.5px; }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  /* ── Progress rail ── */
+  .rail { display: none; margin-top: 28px; }
+  .rail.active { display: block; }
+  .stages { display: flex; border: 1px solid var(--line); border-radius: 13px; overflow: hidden; }
+  .stage {
+    flex: 1; padding: 11px 8px; background: var(--panel); font-size: 11.5px; color: var(--muted);
+    border-right: 1px solid var(--line); text-align: center; position: relative;
+    transition: color .2s, background .2s;
+  }
+  .stage:last-child { border-right: 0; }
+  .stage.done { color: var(--ok); }
+  .stage.now  { color: var(--saffron); background: var(--panel-2); }
+  .stage.now::after {
+    content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
+    background: linear-gradient(90deg, transparent, var(--saffron), transparent);
+    animation: scan 1.4s ease-in-out infinite;
+  }
+  @keyframes scan { 0% { transform: scaleX(0); transform-origin: left; }
+                    50% { transform: scaleX(1); transform-origin: left; }
+                    50.001% { transform: scaleX(1); transform-origin: right; }
+                    100% { transform: scaleX(0); transform-origin: right; } }
+
+  .statusline { margin-top: 10px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .statusline .provider-badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600;
+  }
+  .statusline .err { color: var(--err); }
+
+  pre.log {
+    margin-top: 12px; background: #060a12; border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto;
+    white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, monospace;
+  }
+
+  details.trends {
+    margin-top: 14px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 14px 18px;
+  }
+  details.trends summary { cursor: pointer; color: var(--saffron); font-size: 14px; font-weight: 600; }
+  details.trends div { margin-top: 10px; font-size: 13.5px; color: var(--muted); white-space: pre-wrap; line-height: 1.6; }
+
+  /* ── Output cards ── */
+  .outputs-header { margin-top: 44px; margin-bottom: 18px; display: flex; align-items: baseline; gap: 12px; }
+  .outputs-header h2 { font-size: 20px; }
+  .count-badge {
+    background: var(--saffron-glow); border: 1px solid rgba(255,153,51,.25);
+    color: var(--saffron); font-size: 12px; font-weight: 700;
+    padding: 2px 10px; border-radius: 999px;
+  }
+
+  .outputs { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 22px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 16px;
+    transition: border-color .2s, box-shadow .2s;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .card:hover { border-color: var(--line-hover); box-shadow: 0 8px 40px rgba(0,0,0,.5); }
+
+  .phone {
+    aspect-ratio: 9/16; border-radius: 16px; overflow: hidden; border: 2.5px solid #1e2d48;
+    background: #000; position: relative;
+  }
+  .phone video { width: 100%; height: 100%; object-fit: cover; }
+  .style-chip {
+    position: absolute; top: 10px; left: 10px;
+    background: rgba(8,12,20,.85); color: var(--saffron);
+    font-size: 10.5px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid rgba(255,153,51,.3); z-index: 2; font-weight: 600;
+    backdrop-filter: blur(6px);
+  }
+  .provider-chip {
+    position: absolute; top: 10px; right: 10px;
+    background: rgba(8,12,20,.85); font-size: 10px; padding: 3px 9px;
+    border-radius: 999px; border: 1px solid var(--line); z-index: 2;
+    backdrop-filter: blur(6px); font-weight: 600;
+  }
+
+  .card h3 { font-size: 15px; line-height: 1.4; }
+  .hook-text {
+    font-size: 13px; color: var(--saffron); font-weight: 600;
+    background: var(--saffron-glow); border: 1px solid rgba(255,153,51,.2);
+    border-radius: 8px; padding: 7px 10px;
+  }
+  .hook-text span { color: var(--muted); font-weight: 400; }
+  .meta { font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+  .meta strong { color: var(--text); }
+  .tags { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tags span {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--saffron);
+    border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 500;
+  }
+  .thumbwrap img { width: 100%; border-radius: 10px; border: 1px solid var(--line); }
+
+  .links { display: flex; gap: 8px; margin-top: auto; }
+  .links a {
+    flex: 1; text-align: center; text-decoration: none; color: var(--muted); font-size: 12.5px;
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 0;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .links a:hover { border-color: var(--saffron); color: var(--saffron); background: var(--saffron-glow); }
+  .links a.primary {
+    background: var(--saffron); color: #1a0800; border-color: var(--saffron); font-weight: 600;
+  }
+  .links a.primary:hover { background: var(--saffron-2); border-color: var(--saffron-2); }
+
+  /* ── System check panel ── */
+  .syscheck-wrap {
+    margin-bottom: 28px;
+  }
+  .syscheck-bar {
+    display: flex; align-items: center; gap: 12px; cursor: pointer;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 13px;
+    padding: 13px 18px; user-select: none;
+    transition: border-color .15s;
+  }
+  .syscheck-bar:hover { border-color: var(--line-hover); }
+  .syscheck-bar.open { border-radius: 13px 13px 0 0; border-bottom-color: transparent; }
+  .syscheck-icon { font-size: 17px; }
+  .syscheck-title { font-weight: 600; font-size: 14px; flex: 1; }
+  .syscheck-pill {
+    font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+    letter-spacing: .04em;
+  }
+  .pill-ok    { background: rgba(62,232,123,.15); color: var(--ok);    border: 1px solid rgba(62,232,123,.25); }
+  .pill-warn  { background: rgba(251,191,36,.15);  color: #fbbf24;      border: 1px solid rgba(251,191,36,.25); }
+  .pill-error { background: rgba(255,81,81,.15);   color: var(--err);   border: 1px solid rgba(255,81,81,.25); }
+  .pill-spin  { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+  .syscheck-chevron { color: var(--muted); font-size: 13px; transition: transform .2s; }
+  .syscheck-bar.open .syscheck-chevron { transform: rotate(180deg); }
+
+  .syscheck-body {
+    display: none;
+    background: var(--panel); border: 1px solid var(--line); border-top: none;
+    border-radius: 0 0 13px 13px; padding: 0 18px 14px;
+  }
+  .syscheck-body.open { display: block; }
+
+  .check-item {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 11px 0; border-top: 1px solid var(--line);
+  }
+  .check-item:first-child { border-top: none; }
+  .check-status { font-size: 16px; line-height: 1; flex-shrink: 0; margin-top: 1px; }
+  .check-name { font-size: 13.5px; font-weight: 600; flex: none; min-width: 180px; }
+  .check-detail { font-size: 12.5px; color: var(--muted); line-height: 1.5; word-break: break-all; }
+  .btn-recheck {
+    margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px;
+    display: flex; justify-content: flex-end;
+  }
+  .btn-recheck button {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    font: 600 12.5px "Space Grotesk", sans-serif; padding: 7px 18px; border-radius: 8px;
+    cursor: pointer; transition: border-color .15s;
+  }
+  .btn-recheck button:hover { border-color: var(--saffron); color: var(--saffron); }
+
+  @media (max-width: 700px) {
+    header { padding: 18px 18px 14px; }
+    header .tagline { display: none; }
+    .row-main { grid-template-columns: 1fr; }
+    main { padding: 20px 14px 60px; }
+    button.go { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) { .stage.now::after { animation: none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 class="display">Shorts <em>Studio</em></h1>
+  <span class="badge">AI Pipeline</span>
+  <span class="tagline">paste a video → trend-tuned clips, captions &amp; thumbnails</span>
+</header>
+
+<main>
+  <!-- ── System Check panel ── -->
+  <div class="syscheck-wrap">
+    <div class="syscheck-bar" id="syscheckBar">
+      <span class="syscheck-icon">🔬</span>
+      <span class="syscheck-title">System Check</span>
+      <span class="syscheck-pill pill-spin" id="syscheckPill">Not run</span>
+      <span class="syscheck-chevron">▼</span>
+    </div>
+    <div class="syscheck-body" id="syscheckBody">
+      <div id="syscheckItems" style="margin-top:4px;color:var(--muted);font-size:13px;padding:12px 0">
+        Click "Run Check" to test all dependencies and API keys.
+      </div>
+      <div class="btn-recheck">
+        <button id="recheckBtn">▶ Run Check</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Intake form ── -->
+  <section class="intake" id="intake">
+
+    <!-- Video source row -->
+    <div>
+      <label class="section-label" for="url">Video URL <span style="font-weight:400">(YouTube or any yt-dlp platform)</span></label>
+      <div class="row-main">
+        <input id="url" type="url" placeholder="https://www.youtube.com/watch?v=..." />
+        <div>
+          <label class="section-label" for="count">Clips</label>
+          <input id="count" type="number" min="1" max="8" value="3" />
+        </div>
+        <button class="go" id="go">Make Shorts</button>
+      </div>
+    </div>
+
+    <div class="divider">or upload a file</div>
+    <div>
+      <input type="file" id="file" accept="video/*" style="color:var(--muted);font-size:13px" />
+    </div>
+
+    <!-- AI provider selector -->
+    <div>
+      <label class="section-label">AI Provider</label>
+      <div class="provider-row" id="providerRow">
+        <label class="provider-pill active-anthropic" id="pill-anthropic">
+          <input type="radio" name="aiProvider" value="anthropic" checked />
+          <span class="provider-dot dot-anthropic"></span>
+          Claude (Anthropic)
+        </label>
+        <label class="provider-pill" id="pill-openai">
+          <input type="radio" name="aiProvider" value="openai" />
+          <span class="provider-dot dot-openai"></span>
+          GPT-4o (OpenAI)
+        </label>
+        <label class="provider-pill" id="pill-gemini">
+          <input type="radio" name="aiProvider" value="gemini" />
+          <span class="provider-dot dot-gemini"></span>
+          Gemini (Google)
+        </label>
+      </div>
+    </div>
+
+    <!-- User description / trend notes -->
+    <div>
+      <label class="section-label" for="description">
+        Creator Instructions &amp; Trend Context
+        <span style="font-weight:400;text-transform:none;letter-spacing:0"> — optional but powerful</span>
+      </label>
+      <textarea  id="description" placeholder="Tell the AI what's trending or what you want it to focus on. Examples:
+• Right now Indian reels are loving 'slow zoom + dramatic pause' edits
+• This week's trend: mix Hindi slang 'arey yaar' in hooks
+• Focus on moments where the speaker is emotional or drops a punchline
+• Trending meme: 'Main karoon toh saala character dheela hai' format
+• Avoid religious or political clips
+• Target: college students aged 18–24"></textarea>
+    </div>
+
+  </section>
+
+  <!-- ── Progress rail ── -->
+  <section class="rail" id="rail">
+    <div class="stages" id="stages"></div>
+    <div class="statusline" id="statusline"></div>
+    <details class="trends" id="trendbox" hidden>
+      <summary>📊 Trend brief used for this run</summary>
+      <div id="trendtext"></div>
+    </details>
+    <pre class="log" id="log" hidden></pre>
+  </section>
+
+  <!-- ── Outputs ── -->
+  <div class="outputs-header" id="outputsHeader" hidden>
+    <h2 class="display">Your Clips</h2>
+    <span class="count-badge" id="clipCountBadge"></span>
+  </div>
+  <section class="outputs" id="outputs"></section>
+</main>
+
+<script>
+const STAGES = ["Download", "Transcribe", "Trend research", "Clip planning", "Editing", "Done"];
+const stageEl      = document.getElementById("stages");
+const rail         = document.getElementById("rail");
+const statusline   = document.getElementById("statusline");
+const logEl        = document.getElementById("log");
+const outputs      = document.getElementById("outputs");
+const outputsHeader= document.getElementById("outputsHeader");
+const clipCountBadge=document.getElementById("clipCountBadge");
+const trendbox     = document.getElementById("trendbox");
+const trendtext    = document.getElementById("trendtext");
+const goBtn        = document.getElementById("go");
+
+// ── Provider pill selection ──
+const pills = document.querySelectorAll(".provider-pill");
+pills.forEach(pill => {
+  const radio = pill.querySelector("input[type=radio]");
+  radio.addEventListener("change", () => {
+    pills.forEach(p => p.className = "provider-pill");
+    if (radio.checked) pill.classList.add("active-" + radio.value);
+  });
+  // init
+  if (radio.checked) pill.classList.add("active-" + radio.value);
+});
+
+function getProvider() {
+  return document.querySelector("input[name=aiProvider]:checked")?.value || "anthropic";
+}
+
+// ── Stage helpers ──
+function stageIndex(stage) {
+  const s = stage.toLowerCase();
+  if (s.includes("download") || s.includes("upload") || s.includes("queue")) return 0;
+  if (s.includes("transcrib") || s.includes("video ready")) return 1;
+  if (s.includes("trend")) return 2;
+  if (s.includes("select") || s.includes("script")) return 3;
+  if (s.includes("edit") || s.includes("clip")) return 4;
+  if (s.includes("all clips") || s.includes("done")) return 5;
+  return 0;
+}
+
+function renderStages(current, failed) {
+  stageEl.innerHTML = STAGES.map((s, i) => {
+    const cls = failed && i === current ? "stage" :
+                i < current ? "stage done" :
+                i === current ? "stage now" : "stage";
+    const icon = i < current ? "✓ " : i === current && !failed ? "▸ " : "";
+    return `<div class="${cls}">${icon}${s}</div>`;
+  }).join("");
+}
+
+// ── Provider colour helper ──
+const PROVIDER_COLOURS = {
+  anthropic: { color: "#c084fc", bg: "rgba(192,132,252,.15)" },
+  openai:    { color: "#4ade80", bg: "rgba(74,222,128,.15)" },
+  gemini:    { color: "#38bdf8", bg: "rgba(56,189,248,.15)" },
+};
+function providerBadgeHtml(provider) {
+  const c = PROVIDER_COLOURS[provider] || PROVIDER_COLOURS.anthropic;
+  return `<span class="provider-badge" style="color:${c.color};background:${c.bg};border:1px solid ${c.color}40">${provider}</span>`;
+}
+
+// ── Output rendering ──
+function renderOutputs(job) {
+  outputsHeader.hidden = false;
+  clipCountBadge.textContent = `${job.outputs.length} clip${job.outputs.length !== 1 ? "s" : ""}`;
+  const pc = PROVIDER_COLOURS[job.aiProvider] || PROVIDER_COLOURS.anthropic;
+
+  outputs.innerHTML = (job.outputs || []).map(o => {
+    const p = o.plan;
+    return `<article class="card">
+      <div class="phone">
+        <span class="style-chip">${p.captionStyle} captions</span>
+        <span class="provider-chip" style="color:${pc.color};border-color:${pc.color}40">${job.aiProvider}</span>
+        <video src="${o.clip}" controls playsinline></video>
+      </div>
+      <h3>${escapeHtml(p.title)}</h3>
+      <div class="hook-text"><span>Hook → </span>${escapeHtml(p.hook)}</div>
+      <p class="meta">
+        <strong>Why picked:</strong> ${escapeHtml(p.reason)}<br>
+        <strong>Script:</strong> ${escapeHtml(p.script)}
+      </p>
+      <div class="tags">${(p.hashtags||[]).map(h => `<span>${escapeHtml(h.startsWith("#")?h:"#"+h)}</span>`).join("")}</div>
+      <div class="thumbwrap"><img src="${o.thumbnail}" alt="thumbnail for ${escapeHtml(p.title)}" loading="lazy" /></div>
+      <div class="links">
+        <a href="${o.clip}" download class="primary">⬇ Clip</a>
+        <a href="${o.thumbnail}" download>⬇ Thumbnail</a>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+function escapeHtml(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+// ── SSE watcher ──
+function watch(id, provider) {
+  rail.classList.add("active");
+  const es = new EventSource(`/api/jobs/${id}/events`);
+  es.onmessage = (e) => {
+    const job = JSON.parse(e.data);
+    const failed = job.status === "error";
+    renderStages(stageIndex(job.stage), failed);
+    statusline.innerHTML = failed
+      ? `<span class="err">✕ ${escapeHtml(job.error || job.stage)}</span>`
+      : `▸ ${escapeHtml(job.stage)} ${providerBadgeHtml(provider)}`;
+    if (job.log?.length) { logEl.hidden = false; logEl.textContent = job.log.slice(-50).join("\n"); logEl.scrollTop = logEl.scrollHeight; }
+    if (job.trendBrief) { trendbox.hidden = false; trendtext.textContent = job.trendBrief; }
+    if (job.outputs?.length) renderOutputs(job);
+    if (job.status === "done" || failed) { es.close(); goBtn.disabled = false; }
+  };
+  es.onerror = () => {};
+}
+
+// ── Submit ──
+goBtn.addEventListener("click", async () => {
+  const url         = document.getElementById("url").value.trim();
+  const file        = document.getElementById("file").files[0];
+  const clipCount   = document.getElementById("count").value;
+  const provider    = getProvider();
+  const description = document.getElementById("description").value.trim();
+
+  if (!url && !file) {
+    statusline.innerHTML = '<span class="err">Paste a URL or choose a file first.</span>';
+    rail.classList.add("active");
+    renderStages(0, true);
+    return;
+  }
+
+  goBtn.disabled = true;
+  outputs.innerHTML = "";
+  outputsHeader.hidden = true;
+
+  let res;
+  if (file) {
+    const fd = new FormData();
+    fd.append("clipCount",   clipCount);
+    fd.append("aiProvider",  provider);
+    fd.append("description", description);
+    fd.append("video",       file);
+    res = await fetch("/api/jobs", { method: "POST", body: fd });
+  } else {
+    res = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, clipCount, aiProvider: provider, description }),
+    });
+  }
+
+  const data = await res.json();
+  if (!res.ok) {
+    statusline.innerHTML = `<span class="err">${escapeHtml(data.error)}</span>`;
+    rail.classList.add("active");
+    renderStages(0, true);
+    goBtn.disabled = false;
+    return;
+  }
+  watch(data.id, provider);
+});
+// ── System Check ─────────────────────────────────────────────────────────────
+const syscheckBar   = document.getElementById("syscheckBar");
+const syscheckBody  = document.getElementById("syscheckBody");
+const syscheckPill  = document.getElementById("syscheckPill");
+const syscheckItems = document.getElementById("syscheckItems");
+const recheckBtn    = document.getElementById("recheckBtn");
+
+const STATUS_ICON  = { ok: "✅", warn: "⚠️", error: "❌" };
+const STATUS_COLOR = { ok: "var(--ok)", warn: "#fbbf24", error: "var(--err)" };
+
+syscheckBar.addEventListener("click", () => {
+  const isOpen = syscheckBody.classList.toggle("open");
+  syscheckBar.classList.toggle("open", isOpen);
+});
+
+async function runCheck() {
+  syscheckPill.className = "syscheck-pill pill-spin";
+  syscheckPill.textContent = "Checking…";
+  recheckBtn.disabled = true;
+  recheckBtn.textContent = "Checking…";
+  syscheckItems.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:10px 0">Running checks — this may take a few seconds…</div>`;
+
+  // Auto-open if not already
+  if (!syscheckBody.classList.contains("open")) {
+    syscheckBody.classList.add("open");
+    syscheckBar.classList.add("open");
+  }
+
+  try {
+    const res  = await fetch("/api/system-check");
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || "Unknown error");
+
+    // Update pill
+    const pClass = { ok: "pill-ok", warn: "pill-warn", error: "pill-error" }[data.overall] || "pill-spin";
+    const pLabel = { ok: "All Good", warn: "Warnings", error: "Issues Found" }[data.overall] || "Unknown";
+    syscheckPill.className = `syscheck-pill ${pClass}`;
+    syscheckPill.textContent = pLabel;
+
+    // Render rows
+    syscheckItems.innerHTML = (data.results || []).map(r => `
+      <div class="check-item">
+        <span class="check-status">${STATUS_ICON[r.status] || "❓"}</span>
+        <span class="check-name" style="color:${STATUS_COLOR[r.status] || "var(--text)"}">${escapeHtml(r.name)}</span>
+        <span class="check-detail">${escapeHtml(r.detail)}</span>
+      </div>
+    `).join("");
+
+    if (data.checkedAt) {
+      syscheckItems.insertAdjacentHTML("beforeend",
+        `<div style="font-size:11px;color:var(--muted);margin-top:8px;text-align:right">Checked at ${new Date(data.checkedAt).toLocaleTimeString()}</div>`
+      );
+    }
+  } catch(e) {
+    syscheckPill.className = "syscheck-pill pill-error";
+    syscheckPill.textContent = "Failed";
+    syscheckItems.innerHTML = `<div style="color:var(--err);font-size:13px;padding:10px 0">Check failed: ${escapeHtml(String(e.message || e))}</div>`;
+  } finally {
+    recheckBtn.disabled = false;
+    recheckBtn.textContent = "↺ Re-check";
+  }
+}
+
+recheckBtn.addEventListener("click", runCheck);
+
+// Auto-run on page load so the user sees status immediately
+window.addEventListener("load", runCheck);
+</script>
+</body>
+</html>

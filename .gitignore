@@ -4,3 +4,4 @@ fonts/
 .env
 *.log
 dist/
+.superpowers/
