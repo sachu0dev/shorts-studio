@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch server/index.ts",
-    "start": "tsx server/index.ts"
+    "start": "tsx server/index.ts",
+    "test": "node --import tsx --test 'server/**/*.test.ts'"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.57.0",
