@@ -7,8 +7,8 @@ Feed it a video URL (YouTube or anything yt-dlp supports) or upload a file, tell
 1. **Download** the video (yt-dlp, ≤1080p mp4) + platform subtitles (en/hi)
 2. **Transcribe** — parses the platform's VTT subtitles; falls back to local Whisper if none exist
 3. **Research trends** — Claude with live web search builds a brief on what's trending in Indian short-form video right now, seeded by your video's topic
-4. **Plan clips** — Claude reads the full timestamped transcript + trend brief, picks non-overlapping 20–58s moments, and writes for each: title, 2-second hook text, script, 5–8 Hinglish hashtags, word-grouped caption timings, a caption style, and the best thumbnail frame
-5. **Auto-edit** — ffmpeg cuts each clip, center-crops to 9:16 @1080×1920, and burns animated ASS captions using one of three auto-chosen templates (`pop`, `minimal`, `hype`) plus a pop-in hook overlay for the first 2 seconds
+4. **Plan clips** — Claude reads the full timestamped transcript + trend brief, picks non-overlapping 20–58s moments, and writes for each: title, hook, script, hashtags, word-grouped emphasis-marked captions, a content mode (funny/gaming/political), a caption animation + palette + font, a layout/effect template, meme/GIF placements, and a monetization-risk self-assessment.
+5. **Auto-edit** — ffmpeg cuts each clip, applies the AI-chosen layout/effect filter graph, composites any meme/GIF overlays (via Giphy), and burns word-level karaoke-style animated captions using the AI-chosen animation + palette + Google Font (cached locally after first use).
 6. **Thumbnails** — grabs the chosen frame, punches contrast/saturation, overlays bold title text
 
 Everything streams live to the browser (SSE) and finished clips render in 9:16 phone-frame cards with download buttons.
@@ -35,6 +35,7 @@ Open http://localhost:5177
 
 - Only use this with videos you have the rights/permission to repurpose.
 - Output files land in `storage/<jobId>/out/`.
-- Caption styles live in `server/pipeline/edit.ts` (`STYLES`) — they're plain ASS style lines, easy to tweak fonts/colors or add new templates. Claude picks the template per clip based on the clip's energy.
-- Clip count is clamped 1–8. Adjust in `server/index.ts` if you want more.
-- The crop is a center crop (works well for talking heads). For content where the subject moves around, swap the `crop` filter in `renderClip` for ffmpeg's `cropdetect` or a face-tracking pass.
+- Caption animations/palettes live in `server/pipeline/captions.ts`, layout/effect templates in `server/pipeline/layouts.ts` — both are plain lookup functions, easy to extend with new options.
+- Meme/GIF insertion requires `GIPHY_API_KEY` in `.env` (free from Giphy's developer portal) — without it, meme placements are silently skipped and clips render without them.
+- Fonts are fetched from Google Fonts on first use per family (needs `GOOGLE_FONTS_API_KEY`) and cached in `fonts/` — subsequent jobs reuse the cached file, no repeat network calls.
+- The "Allow controversial/edgy content" toggle only shifts the AI's clip-*selection* bias — every clip renders regardless, monetization risk is always surfaced as an informational badge, never a block.
