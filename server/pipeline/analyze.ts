@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import type { Segment } from "./transcribe.js";
-import type { ClipPlan, AiProvider } from "../jobs.js";
+import type { ClipPlan, AiProvider, ContentMode, CaptionAnimation, CaptionPalette, LayoutTemplate } from "../jobs.js";
 
 // ─── Lazy singletons ───────────────────────────────────────────────────────────
 function getAnthropic() {
@@ -97,6 +97,85 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
   return complete(provider, prompt, 1500, provider === "anthropic");
 }
 
+const VALID_CONTENT_MODES: ContentMode[] = ["funny", "gaming", "political"];
+const VALID_ANIMATIONS: CaptionAnimation[] = ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"];
+const VALID_PALETTES: CaptionPalette[] = ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"];
+const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "speed-ramp", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout"];
+
+/** Default-fill and clamp every field of a raw AI-returned clip plan. Never throws. */
+export function sanitizePlan(p: Partial<ClipPlan> & { index: number }, videoDuration: number): ClipPlan {
+  let start = Math.max(0, p.start ?? 0);
+  let end = Math.min(videoDuration, p.end ?? start + 25);
+  if (end - start > 59) end = start + 58;
+  if (end - start < 15) end = Math.min(videoDuration, start + 25);
+  const thumbnailTimestamp = Math.min(Math.max(p.thumbnailTimestamp ?? start, start), end);
+
+  return {
+    index: p.index,
+    title: p.title ?? "",
+    hook: p.hook ?? "",
+    start,
+    end,
+    reason: p.reason ?? "",
+    script: p.script ?? "",
+    hashtags: p.hashtags ?? [],
+    thumbnailText: p.thumbnailText ?? "",
+    thumbnailTimestamp,
+    captions: (p.captions ?? []).filter((c) => c.end > c.start),
+    contentMode: VALID_CONTENT_MODES.includes(p.contentMode as ContentMode) ? (p.contentMode as ContentMode) : "funny",
+    captionAnimation: VALID_ANIMATIONS.includes(p.captionAnimation as CaptionAnimation) ? (p.captionAnimation as CaptionAnimation) : "karaoke-reveal",
+    captionPalette: VALID_PALETTES.includes(p.captionPalette as CaptionPalette) ? (p.captionPalette as CaptionPalette) : "pop-white-red",
+    captionFont: p.captionFont ?? "Anton",
+    layoutTemplate: VALID_LAYOUTS.includes(p.layoutTemplate as LayoutTemplate) ? (p.layoutTemplate as LayoutTemplate) : "fullscreen",
+    memes: p.memes ?? [],
+    monetizationFlag: p.monetizationFlag ?? { risky: false, reasons: [] },
+  };
+}
+
+/** Build the planClips prompt text. Pure function — no API call — for testability. */
+export function buildPlanPrompt(args: {
+  transcript: string;
+  trendBrief: string;
+  descriptionSection: string;
+  clipCount: number;
+  videoDuration: number;
+  controversialMode: boolean;
+}): string {
+  const monetizationInstruction = args.controversialMode
+    ? `Edgy, opinionated, or politically controversial moments are explicitly permitted — the creator has opted in to controversial content.`
+    : `Actively avoid clips centered on hate speech, graphic violence, sexual content, harassment, or dangerous misinformation — prefer the next-best safe moment from the transcript instead.`;
+
+  return `You are a viral shorts editor for the Indian market.
+
+TREND BRIEF (current Indian shorts trends):
+${args.trendBrief}
+${args.descriptionSection}
+FULL VIDEO TRANSCRIPT with [start-end] second timestamps (video duration ${args.videoDuration.toFixed(0)}s):
+${args.transcript}
+
+Task: choose exactly ${args.clipCount} clips for YouTube Shorts. Rules:
+- Each clip 20-58 seconds long, must start/end at natural sentence boundaries from the transcript.
+- Prioritize moments matching the trend brief AND the creator instructions: strong hooks, emotion, payoff, controversy, "wait for it" moments.
+- Clips must not overlap.
+- captions: word-grouped caption chunks (2-5 words each) covering the clip's speech, with start/end in seconds RELATIVE TO THE CLIP START, derived from the transcript timing. Wrap the single most important word or short phrase per chunk in **double asterisks** to mark it for visual emphasis (e.g. "this is **insane**").
+- contentMode: classify the clip as "funny", "gaming", or "political" based on its content and tone.
+- captionAnimation: pick per clip from "karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split" — whichever suits the clip's energy.
+- captionPalette: pick per clip from "gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean" — match to contentMode (e.g. gaming -> gaming-neon, political -> news-serious).
+- captionFont: pick a bold, high-impact Google Fonts family name appropriate to the palette (e.g. "Anton", "Bebas Neue", "Luckiest Guy", "Archivo Black", "Poppins", "Montserrat").
+- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "speed-ramp", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout".
+- memes: an array (can be empty) of {start, end, query, display} for moments where a meme/reaction GIF would land well. display is one of "corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split". query is a short search term (e.g. "shocked cat", "mind blown").
+- monetizationFlag: {risky: boolean, reasons: string[]} — your honest self-assessment of demonetization risk for this clip's content (hate speech, graphic violence, sexual content, harassment, dangerous misinformation, excessive profanity). ${monetizationInstruction}
+- thumbnailTimestamp: an absolute second in the source video with a strong facial expression or key visual for that clip.
+- hashtags: 5-8, mix of English + Hindi/Hinglish, India-relevant.
+- title: <=90 chars, curiosity-driven, no clickbait lies.
+- hook: <=8 words shown on screen for the first 2 seconds.
+- script: a 2-3 sentence description of the clip's narrative arc (used for description text).
+
+Respond ONLY with a JSON array of ${args.clipCount} objects with keys:
+index, title, hook, start, end, reason, script, hashtags, thumbnailText, thumbnailTimestamp, captions, contentMode, captionAnimation, captionPalette, captionFont, layoutTemplate, memes, monetizationFlag.
+No markdown fences, no commentary.`;
+}
+
 /**
  * Step 2: Pick clips and write scripts/captions/hashtags as strict JSON.
  * The userDescription is injected into the prompt for additional creative direction.
@@ -107,7 +186,8 @@ export async function planClips(
   trendBrief: string,
   videoDuration: number,
   provider: AiProvider,
-  userDescription: string
+  userDescription: string,
+  controversialMode: boolean
 ): Promise<ClipPlan[]> {
   const compact = transcript
     .map((s) => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text}`)
@@ -118,44 +198,19 @@ export async function planClips(
     ? `\nADDITIONAL CREATOR INSTRUCTIONS (high priority — incorporate these into clip selection, hooks and scripts):\n${userDescription.trim()}\n`
     : "";
 
-  const prompt = `You are a viral shorts editor for the Indian market.
-
-TREND BRIEF (current Indian shorts trends):
-${trendBrief}
-${descriptionSection}
-FULL VIDEO TRANSCRIPT with [start-end] second timestamps (video duration ${videoDuration.toFixed(0)}s):
-${compact}
-
-Task: choose exactly ${clipCount} clips for YouTube Shorts. Rules:
-- Each clip 20-58 seconds long, must start/end at natural sentence boundaries from the transcript.
-- Prioritize moments matching the trend brief AND the creator instructions: strong hooks, emotion, payoff, controversy, "wait for it" moments.
-- Clips must not overlap.
-- captions: word-grouped caption chunks (2-5 words each) covering the clip's speech, with start/end in seconds RELATIVE TO THE CLIP START, derived from the transcript timing.
-- captionStyle: pick per clip from "pop" (bold white + color pop words), "minimal" (clean lower-third), "hype" (big yellow punch-ins) — whichever suits the clip's energy.
-- thumbnailTimestamp: an absolute second in the source video with a strong facial expression or key visual for that clip.
-- hashtags: 5-8, mix of English + Hindi/Hinglish, India-relevant.
-- title: <=90 chars, curiosity-driven, no clickbait lies.
-- hook: <=8 words shown on screen for the first 2 seconds.
-- script: a 2-3 sentence description of the clip's narrative arc (used for description text).
-
-Respond ONLY with a JSON array of ${clipCount} objects with keys:
-index, title, hook, start, end, reason, script, hashtags, captionStyle, thumbnailText, thumbnailTimestamp, captions.
-No markdown fences, no commentary.`;
+  const prompt = buildPlanPrompt({
+    transcript: compact,
+    trendBrief,
+    descriptionSection,
+    clipCount,
+    videoDuration,
+    controversialMode,
+  });
 
   const text = (await complete(provider, prompt, 8000))
     .replace(/```json|```/g, "")
     .trim();
 
-  const plans = JSON.parse(text) as ClipPlan[];
-
-  // sanity clamps
-  for (const p of plans) {
-    p.start = Math.max(0, p.start);
-    p.end = Math.min(videoDuration, p.end);
-    if (p.end - p.start > 59) p.end = p.start + 58;
-    if (p.end - p.start < 15) p.end = Math.min(videoDuration, p.start + 25);
-    p.thumbnailTimestamp = Math.min(Math.max(p.thumbnailTimestamp, p.start), p.end);
-    p.captions = (p.captions || []).filter((c) => c.end > c.start);
-  }
-  return plans;
+  const rawPlans = JSON.parse(text) as (Partial<ClipPlan> & { index: number })[];
+  return rawPlans.map((p) => sanitizePlan(p, videoDuration));
 }
