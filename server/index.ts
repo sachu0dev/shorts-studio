@@ -37,13 +37,14 @@ app.post("/api/jobs", uploadMiddleware(STORAGE), (req: any, res) => {
   const filePath    = req.uploadedFile as string | undefined;
   const aiProvider  = (req.body.aiProvider as AiProvider) || "anthropic";
   const description = (req.body.description as string || "").slice(0, 4000); // guard length
+  const controversialMode = req.body.controversialMode === "true" || req.body.controversialMode === true;
 
   if (!url && !filePath) return res.status(400).json({ error: "Provide a video URL or upload a file" });
 
   const missing = missingKey(aiProvider);
   if (missing) return res.status(400).json({ error: `${missing} missing in .env — required for ${aiProvider}` });
 
-  const job = createJob({ url, filePath, clipCount, aiProvider, description });
+  const job = createJob({ url, filePath, clipCount, aiProvider, description, controversialMode });
   runPipeline(job).catch((err) => {
     job.status = "error";
     job.error = String(err?.message || err);
@@ -130,7 +131,8 @@ async function runPipeline(job: Job) {
     job.trendBrief,
     duration,
     job.aiProvider,
-    job.description
+    job.description,
+    job.controversialMode
   );
   job.plans = plans;
   log(`Planned ${plans.length} clips`);
