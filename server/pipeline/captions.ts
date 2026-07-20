@@ -55,7 +55,7 @@ export const PALETTES: Record<CaptionPalette, { normal: string; punch: string; o
 
 /** Build the ASS override-tag block ({...}) for one word event. */
 export function buildWordOverrideTags(
-  word: { word: string; punch: boolean },
+  word: TimedWord,
   animation: CaptionAnimation,
   palette: CaptionPalette
 ): string {
