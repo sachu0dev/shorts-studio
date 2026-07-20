@@ -59,3 +59,19 @@ test("resolveFont falls back to Anton when no API key configured", async () => {
   const result = await resolveFont("SomeFont", { fontsDir: dir, apiKey: undefined });
   assert.equal(result, path.join(dir, "Anton.ttf"));
 });
+
+test("resolveFont sanitizes family so it cannot escape fontsDir", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "fonts-test-"));
+  // Sanitizing "../../etc/passwd" (strip anything but letters/digits/space/hyphen) yields "etcpasswd".
+  writeFileSync(path.join(dir, "etcpasswd.ttf"), "sanitized-cache-hit");
+  let fetchCalled = false;
+  const fakeFetch = (async () => {
+    fetchCalled = true;
+    throw new Error("should not be called");
+  }) as unknown as typeof fetch;
+
+  const result = await resolveFont("../../etc/passwd", { fontsDir: dir, fetchFn: fakeFetch });
+  assert.equal(result, path.join(dir, "etcpasswd.ttf"));
+  assert.equal(fetchCalled, false);
+  assert.ok(path.resolve(result).startsWith(path.resolve(dir)));
+});

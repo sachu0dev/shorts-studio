@@ -19,9 +19,16 @@ interface ResolveFontOpts {
  */
 export async function resolveFont(family: string, opts: ResolveFontOpts = {}): Promise<string> {
   const fontsDir = opts.fontsDir ?? DEFAULT_FONTS_DIR;
-  mkdirSync(fontsDir, { recursive: true });
-  const cachedPath = path.join(fontsDir, `${family}.ttf`);
   const fallbackPath = path.join(fontsDir, `${FALLBACK_FAMILY}.ttf`);
+  // ponytail: strip anything but letters/digits/space/hyphen so `family` can't escape fontsDir
+  const safeFamily = family.replace(/[^a-zA-Z0-9 -]/g, "");
+  const cachedPath = path.join(fontsDir, `${safeFamily}.ttf`);
+
+  try {
+    mkdirSync(fontsDir, { recursive: true });
+  } catch {
+    return fallbackPath;
+  }
 
   if (existsSync(cachedPath)) return cachedPath;
 
