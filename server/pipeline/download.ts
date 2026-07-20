@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync } from "node:fs"; // existsSync used in ensureDir
 import path from "node:path";
 
 export function run(cmd: string, args: string[], onLine?: (l: string) => void): Promise<void> {
@@ -18,8 +18,10 @@ export function run(cmd: string, args: string[], onLine?: (l: string) => void): 
 }
 
 /**
- * Downloads the video (mp4, <=1080p to keep ffmpeg fast) and English/Hindi
- * auto-subtitles if available. Returns { videoPath, subPath? }.
+ * Downloads the video (mp4, <=1080p to keep ffmpeg fast).
+ * Subtitles are attempted separately as a best-effort step so that
+ * a 429 / rate-limit error never aborts the pipeline.
+ * Returns { videoPath, subPath? }.
  */
 export async function downloadVideo(
   url: string,
@@ -29,30 +31,49 @@ export async function downloadVideo(
   mkdirSync(destDir, { recursive: true });
   const outTemplate = path.join(destDir, "source.%(ext)s");
 
+  // ── Phase 1: download the video stream only (no subtitle flags) ──────────
+  await run(
+    "yt-dlp",
+    [
+      "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
+      "--merge-output-format", "mp4",
+      "--no-playlist",
+      "--no-write-subs",
+      "--no-write-auto-subs",
+      "-o", outTemplate,
+      url,
+    ],
+    onLine
+  );
+
+  // Confirm the video file is present before doing anything else
+  const filesAfterVideo = readdirSync(destDir);
+  const videoFile = filesAfterVideo.find(
+    (f) => f.startsWith("source.") && f.endsWith(".mp4")
+  );
+  if (!videoFile) throw new Error("Download finished but no mp4 found");
+
+  // ── Phase 2: attempt subtitle download as best-effort ───────────────────
+  // Use --skip-download so we only fetch the .vtt files, not re-download video.
+  // --ignore-errors prevents a 429 on subtitles from exiting with code 1.
   try {
     await run(
       "yt-dlp",
       [
-        "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
-        "--merge-output-format", "mp4",
+        "--skip-download",
         "--write-auto-subs", "--write-subs",
         "--sub-langs", "en.*,en",
         "--sub-format", "vtt",
-        "-o", outTemplate,
+        "--ignore-errors",
         "--no-playlist",
+        "-o", outTemplate,
         url,
       ],
       onLine
     );
-  } catch (err: any) {
-    // If yt-dlp exited with non-zero (e.g. subtitle 429 rate limit for specific sub language),
-    // check if the mp4 video file was downloaded successfully anyway.
-    const files = existsSync(destDir) ? readdirSync(destDir) : [];
-    const video = files.find((f) => f.startsWith("source.") && f.endsWith(".mp4"));
-    if (!video) {
-      throw err; // Video file is missing: rethrow genuine failure
-    }
-    onLine(`⚠️ Subtitle download notice: ${err.message}. Proceeding with downloaded video.`);
+  } catch (subErr: any) {
+    // Best-effort: subtitle failures (429, network, etc.) are non-fatal
+    onLine(`⚠️ Subtitles unavailable (${subErr.message}). Whisper will transcribe instead.`);
   }
 
   const files = readdirSync(destDir);
