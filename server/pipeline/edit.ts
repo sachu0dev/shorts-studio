@@ -3,6 +3,9 @@ import { writeFileSync } from "node:fs";
 import { run, ensureDir } from "./download.js";
 import type { ClipPlan } from "../jobs.js";
 import { splitWordsWithTiming, buildWordOverrideTags, buildStyleLine } from "./captions.js";
+import { buildLayoutFilter, buildMemeOverlayFilter } from "./layouts.js";
+import { resolveFont } from "./fonts.js";
+import { fetchMemeAsset } from "./memes.js";
 
 function assTime(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -76,24 +79,61 @@ export async function renderClip(
   const outPath = path.join(outDir, `clip${plan.index}.mp4`);
   const assFilter = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
 
-  const vf = [
-    "crop=ih*9/16:ih",              // center crop 16:9 -> 9:16
+  const fontPath = await resolveFont(plan.captionFont);
+  const fontsDir = path.dirname(fontPath).replace(/\\/g, "/").replace(/:/g, "\\:");
+
+  const layoutFilter = buildLayoutFilter(plan.layoutTemplate, plan);
+  const baseChain = [
+    "crop=ih*9/16:ih",
     "scale=1080:1920",
-    `ass='${assFilter}'`,
+    ...(layoutFilter ? [layoutFilter] : []),
+    `ass='${assFilter}':fontsdir='${fontsDir}'`,
   ].join(",");
+
+  // Resolve meme assets (best-effort — missing/failed ones are skipped).
+  const resolvedMemes: { meme: (typeof plan.memes)[number]; assetPath: string }[] = [];
+  for (const meme of plan.memes) {
+    const assetPath = await fetchMemeAsset(meme.query);
+    if (assetPath) resolvedMemes.push({ meme, assetPath });
+    else onLine(`⚠️ Meme fetch skipped for "${meme.query}" — no result or missing TENOR_API_KEY`);
+  }
+
+  if (resolvedMemes.length === 0) {
+    // No memes to composite: simple single -vf chain, same as before.
+    await run(
+      "ffmpeg",
+      [
+        "-y", "-ss", String(plan.start), "-to", String(plan.end), "-i", sourceVideo,
+        "-vf", baseChain,
+        "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+        outPath,
+      ],
+      onLine
+    );
+    return outPath;
+  }
+
+  // With memes: build a filter_complex chaining the base video through the
+  // layout/caption filter, then compositing each meme overlay in sequence.
+  const inputs = ["-ss", String(plan.start), "-to", String(plan.end), "-i", sourceVideo];
+  const complexParts: string[] = [`[0:v]${baseChain}[base]`];
+  let prevLabel = "[base]";
+  resolvedMemes.forEach(({ meme }, i) => {
+    inputs.push("-i", resolvedMemes[i].assetPath);
+    const outLabel = `[out${i}]`;
+    complexParts.push(buildMemeOverlayFilter(meme, `[${i + 1}:v]`, prevLabel, outLabel));
+    prevLabel = outLabel;
+  });
 
   await run(
     "ffmpeg",
     [
-      "-y",
-      "-ss", String(plan.start),
-      "-to", String(plan.end),
-      "-i", sourceVideo,
-      "-vf", vf,
-      "-r", "30",
-      "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-      "-c:a", "aac", "-b:a", "160k",
-      "-movflags", "+faststart",
+      "-y", ...inputs,
+      "-filter_complex", complexParts.join(";"),
+      "-map", prevLabel, "-map", "0:a",
+      "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+      "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
       outPath,
     ],
     onLine
