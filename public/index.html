@@ -389,6 +389,13 @@
 • Target: college students aged 18–24"></textarea>
     </div>
 
+    <div class="field-group">
+      <label class="section-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="controversialMode" />
+        Allow controversial/edgy content (disables the safe-content selection bias)
+      </label>
+    </div>
+
   </section>
 
   <!-- ── Progress rail ── -->
@@ -482,7 +489,8 @@ function renderOutputs(job) {
     const p = o.plan;
     return `<article class="card">
       <div class="phone">
-        <span class="style-chip">${p.captionStyle} captions</span>
+        <span class="style-chip">${p.contentMode} · ${p.layoutTemplate}</span>
+        ${p.monetizationFlag?.risky ? `<span class="badge" style="position:absolute;bottom:10px;left:10px;right:10px;z-index:2;background:rgba(255,81,81,.15);color:var(--err);border:1px solid rgba(255,81,81,.25)" title="${escapeHtml((p.monetizationFlag.reasons || []).join(', '))}">⚠ monetization risk</span>` : ""}
         <span class="provider-chip" style="color:${pc.color};border-color:${pc.color}40">${job.aiProvider}</span>
         <video src="${o.clip}" controls playsinline></video>
       </div>
@@ -530,6 +538,7 @@ goBtn.addEventListener("click", async () => {
   const clipCount   = document.getElementById("count").value;
   const provider    = getProvider();
   const description = document.getElementById("description").value.trim();
+  const controversialMode = document.getElementById("controversialMode").checked;
 
   if (!url && !file) {
     statusline.innerHTML = '<span class="err">Paste a URL or choose a file first.</span>';
@@ -548,13 +557,14 @@ goBtn.addEventListener("click", async () => {
     fd.append("clipCount",   clipCount);
     fd.append("aiProvider",  provider);
     fd.append("description", description);
+    fd.append("controversialMode", String(controversialMode));
     fd.append("video",       file);
     res = await fetch("/api/jobs", { method: "POST", body: fd });
   } else {
     res = await fetch("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, clipCount, aiProvider: provider, description }),
+      body: JSON.stringify({ url, clipCount, aiProvider: provider, description, controversialMode }),
     });
   }
 
