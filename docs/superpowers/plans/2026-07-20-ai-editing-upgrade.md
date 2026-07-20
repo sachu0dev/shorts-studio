@@ -6,13 +6,13 @@
 
 **Architecture:** No new services. Extends the existing single-AI-call pipeline (`researchTrends` → `planClips` → `renderClip`/`renderThumbnail`). Two new small modules (`fonts.ts`, `memes.ts`) for external asset fetching with local caching and DI'd fetch functions for testability. `edit.ts` gains pure string-building functions (caption ASS generation, layout filter graphs, meme overlay filters) that are unit-tested without invoking ffmpeg, plus one real-ffmpeg smoke test at the end using synthetic `lavfi` sources (no checked-in video fixtures needed).
 
-**Tech Stack:** TypeScript (Node 20+, ESM, `tsx`), Express, ffmpeg/ffprobe (CLI, `node:child_process`), Node's built-in `node:test` + `node:assert` (zero new test dependency), Tenor API v2, Google Fonts Developer API v1.
+**Tech Stack:** TypeScript (Node 20+, ESM, `tsx`), Express, ffmpeg/ffprobe (CLI, `node:child_process`), Node's built-in `node:test` + `node:assert` (zero new test dependency), Giphy API v1, Google Fonts Developer API v1.
 
 ## Global Constraints
 
 - Node 20+, ESM (`"type": "module"` in package.json) — all imports use `.js` extensions per existing pattern (see `edit.ts` importing `./download.js`).
 - No new runtime dependencies beyond what's already installed — font/meme fetching uses global `fetch` (Node 20 built-in), test runner is Node's built-in `node:test`.
-- `.env` gains two new keys: `TENOR_API_KEY`, `GOOGLE_FONTS_API_KEY`. Both optional at startup — missing key degrades gracefully (skip meme/font fetch, fall back), never crashes the job.
+- `.env` gains two new keys: `GIPHY_API_KEY`, `GOOGLE_FONTS_API_KEY`. Both optional at startup — missing key degrades gracefully (skip meme/font fetch, fall back), never crashes the job.
 - `monetizationFlag` never blocks rendering — informational only, every clip renders regardless of `risky`.
 - All new ffmpeg filter-graph builders are pure functions (string in, string out) — no ffmpeg invocation inside them — so they're unit-testable without spawning processes. Only the final integration task runs real ffmpeg, using `lavfi` synthetic sources so no video fixture files are needed in the repo.
 - Follow existing code patterns: `Record<Type, ...>` lookup tables (like current `STYLES`), `run()` from `download.ts` for spawning ffmpeg/ffprobe, `.js` import extensions, no classes — plain functions and interfaces throughout, matching the existing pipeline files.
@@ -27,7 +27,7 @@
 | `server/pipeline/captions.ts` | *(new)* pure ASS-text generation: emphasis-word parsing, word-timing interpolation, animation/palette tag builders, dynamic style-line builder |
 | `server/pipeline/fonts.ts` | *(new)* `resolveFont()` — local cache check → Google Fonts API fetch → fallback |
 | `server/pipeline/layouts.ts` | *(new)* pure filter-graph string builders, one per `LayoutTemplate`, plus meme-overlay filter builders per `MemeDisplayMode` |
-| `server/pipeline/memes.ts` | *(new)* `fetchMemeAsset()` — Tenor API search + download |
+| `server/pipeline/memes.ts` | *(new)* `fetchMemeAsset()` — Giphy API search + download |
 | `server/pipeline/edit.ts` | *(modify)* `buildAss` rewritten to use `captions.ts`; `renderClip` wired to use `layouts.ts` + `fonts.ts` + `memes.ts` |
 | `server/pipeline/analyze.ts` | *(modify)* prompt extended with new fields; sanity-clamp loop extracted into testable `sanitizePlan()`; prompt string extracted into testable `buildPlanPrompt()` |
 | `server/index.ts` | *(modify)* accept `controversialMode` from request body, pass through to `createJob`/`planClips` |
@@ -146,7 +146,7 @@ export type MemeDisplayMode =
 export interface MemeOverlay {
   start: number;   // seconds, relative to clip start
   end: number;
-  query: string;   // Tenor search term
+  query: string;   // Giphy search term
   display: MemeDisplayMode;
 }
 ```
@@ -1694,14 +1694,14 @@ Update step 4 and step 5 of the numbered pipeline list (currently lines 10-11) t
 
 ```markdown
 4. **Plan clips** — Claude reads the full timestamped transcript + trend brief, picks non-overlapping 20–58s moments, and writes for each: title, hook, script, hashtags, word-grouped emphasis-marked captions, a content mode (funny/gaming/political), a caption animation + palette + font, a layout/effect template, meme/GIF placements, and a monetization-risk self-assessment.
-5. **Auto-edit** — ffmpeg cuts each clip, applies the AI-chosen layout/effect filter graph, composites any meme/GIF overlays (via Tenor), and burns word-level karaoke-style animated captions using the AI-chosen animation + palette + Google Font (cached locally after first use).
+5. **Auto-edit** — ffmpeg cuts each clip, applies the AI-chosen layout/effect filter graph, composites any meme/GIF overlays (via Giphy), and burns word-level karaoke-style animated captions using the AI-chosen animation + palette + Google Font (cached locally after first use).
 ```
 
 Update the "Notes" section (currently lines 34-40) — replace the "Caption styles live in..." line with:
 
 ```markdown
 - Caption animations/palettes live in `server/pipeline/captions.ts`, layout/effect templates in `server/pipeline/layouts.ts` — both are plain lookup functions, easy to extend with new options.
-- Meme/GIF insertion requires `TENOR_API_KEY` in `.env` (free from Tenor's developer portal) — without it, meme placements are silently skipped and clips render without them.
+- Meme/GIF insertion requires `GIPHY_API_KEY` in `.env` (free from Giphy's developer portal) — without it, meme placements are silently skipped and clips render without them.
 - Fonts are fetched from Google Fonts on first use per family (needs `GOOGLE_FONTS_API_KEY`) and cached in `fonts/` — subsequent jobs reuse the cached file, no repeat network calls.
 - The "Allow controversial/edgy content" toggle only shifts the AI's clip-*selection* bias — every clip renders regardless, monetization risk is always surfaced as an informational badge, never a block.
 ```
