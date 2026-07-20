@@ -17,11 +17,11 @@ export function buildLayoutFilter(template: LayoutTemplate, plan: ClipPlan): str
     case "blurred-fill":
       return "split=2[bg][fg];[bg]scale=1080:1920,boxblur=20:5[bgblur];[fg]scale=1080:960[fgsharp];[bgblur][fgsharp]overlay=0:0";
     case "zoom-punch":
-      return "zoompan=z='if(lte(mod(t,2),0.3),1.08,1.0)':d=1:s=1080x1920";
+      return "zoompan=z='if(lte(mod(time,2),0.3),1.08,1.0)':d=1:s=1080x1920";
     case "shake-on-beat":
       return "crop=iw-20:ih-20:10+5*sin(t*30):10+5*cos(t*30)";
     case "speed-ramp":
-      return "setpts=if(lt(mod(t\\,10)\\,1)\\,2.0*PTS\\,PTS)";
+      return "setpts=if(lt(mod(T\\,10)\\,1)\\,2.0*PTS\\,PTS)";
     case "vignette-pulse":
       return "vignette=PI/4+0.1*sin(t*3)";
     case "glitch-cut":
