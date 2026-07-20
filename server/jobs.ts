@@ -99,11 +99,12 @@ export function createJob(input: {
   clipCount: number;
   aiProvider: AiProvider;
   description: string;
-  controversialMode: boolean;
+  controversialMode?: boolean;
 }): Job {
   const job: Job = {
     id: nanoid(10),
     ...input,
+    controversialMode: input.controversialMode ?? false,
     status: "queued",
     stage: "Queued",
     log: [],
