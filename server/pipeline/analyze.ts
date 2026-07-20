@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import type { Segment } from "./transcribe.js";
-import type { ClipPlan, AiProvider, ContentMode, CaptionAnimation, CaptionPalette, LayoutTemplate } from "../jobs.js";
+import type { ClipPlan, AiProvider, ContentMode, CaptionAnimation, CaptionPalette, LayoutTemplate, MemeOverlay, MemeDisplayMode } from "../jobs.js";
 
 // ─── Lazy singletons ───────────────────────────────────────────────────────────
 function getAnthropic() {
@@ -101,6 +101,32 @@ const VALID_CONTENT_MODES: ContentMode[] = ["funny", "gaming", "political"];
 const VALID_ANIMATIONS: CaptionAnimation[] = ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"];
 const VALID_PALETTES: CaptionPalette[] = ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"];
 const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "speed-ramp", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout"];
+const VALID_MEME_DISPLAYS: MemeDisplayMode[] = ["corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split"];
+
+/**
+ * Validate/clamp AI-supplied meme overlays against the (already-clamped)
+ * clip duration. Drops anything malformed instead of letting NaN/out-of-range
+ * timings reach ffmpeg's filter_complex (which would fail the whole render) —
+ * mirrors the "meme failure never fails the job" guarantee that already
+ * holds for missing/failed Giphy fetches.
+ */
+function sanitizeMemes(raw: Partial<MemeOverlay>[] | undefined, clipDuration: number): MemeOverlay[] {
+  const out: MemeOverlay[] = [];
+  for (const m of raw ?? []) {
+    const start = Number(m.start);
+    const end = Number(m.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    if (end <= start) continue;
+    if (start < 0 || end > clipDuration) continue;
+    out.push({
+      start,
+      end,
+      query: m.query ?? "",
+      display: VALID_MEME_DISPLAYS.includes(m.display as MemeDisplayMode) ? (m.display as MemeDisplayMode) : "corner-overlay",
+    });
+  }
+  return out;
+}
 
 /** Default-fill and clamp every field of a raw AI-returned clip plan. Never throws. */
 export function sanitizePlan(p: Partial<ClipPlan> & { index: number }, videoDuration: number): ClipPlan {
@@ -125,9 +151,11 @@ export function sanitizePlan(p: Partial<ClipPlan> & { index: number }, videoDura
     contentMode: VALID_CONTENT_MODES.includes(p.contentMode as ContentMode) ? (p.contentMode as ContentMode) : "funny",
     captionAnimation: VALID_ANIMATIONS.includes(p.captionAnimation as CaptionAnimation) ? (p.captionAnimation as CaptionAnimation) : "karaoke-reveal",
     captionPalette: VALID_PALETTES.includes(p.captionPalette as CaptionPalette) ? (p.captionPalette as CaptionPalette) : "pop-white-red",
-    captionFont: p.captionFont ?? "Anton",
+    // Strip commas/newlines: this value flows raw into ASS "Style:" lines downstream,
+    // where a comma/newline would inject spurious fields or an extra line.
+    captionFont: (p.captionFont ?? "Anton").replace(/[,\n\r]/g, ""),
     layoutTemplate: VALID_LAYOUTS.includes(p.layoutTemplate as LayoutTemplate) ? (p.layoutTemplate as LayoutTemplate) : "fullscreen",
-    memes: p.memes ?? [],
+    memes: sanitizeMemes(p.memes, end - start),
     monetizationFlag: p.monetizationFlag ?? { risky: false, reasons: [] },
   };
 }

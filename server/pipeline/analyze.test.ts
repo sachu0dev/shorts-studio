@@ -55,3 +55,48 @@ test("buildPlanPrompt always requires monetizationFlag in the output schema", ()
   });
   assert.match(prompt, /monetizationFlag/);
 });
+
+test("sanitizePlan strips commas and newlines from captionFont", () => {
+  const p = sanitizePlan({ index: 0, start: 0, end: 20, captionFont: "Anton,\nEvil\rInjection" } as any, 100);
+  assert.equal(p.captionFont, "AntonEvilInjection");
+});
+
+test("sanitizePlan defaults captionFont to Anton when missing", () => {
+  const p = sanitizePlan({ index: 0, start: 0, end: 20 } as any, 100);
+  assert.equal(p.captionFont, "Anton");
+});
+
+test("sanitizePlan drops memes with end <= start", () => {
+  const p = sanitizePlan({
+    index: 0, start: 0, end: 20,
+    memes: [{ start: 5, end: 5, query: "q", display: "corner-overlay" }],
+  } as any, 100);
+  assert.deepEqual(p.memes, []);
+});
+
+test("sanitizePlan drops memes with out-of-range timings", () => {
+  const p = sanitizePlan({
+    index: 0, start: 0, end: 20,
+    memes: [
+      { start: -1, end: 5, query: "q", display: "corner-overlay" }, // start < 0
+      { start: 5, end: 999, query: "q", display: "corner-overlay" }, // end > clip duration
+      { start: NaN, end: 5, query: "q", display: "corner-overlay" }, // non-numeric
+    ],
+  } as any, 100);
+  assert.deepEqual(p.memes, []);
+});
+
+test("sanitizePlan defaults an invalid meme display mode to corner-overlay", () => {
+  const p = sanitizePlan({
+    index: 0, start: 0, end: 20,
+    memes: [{ start: 1, end: 3, query: "shocked cat", display: "explode-screen" }],
+  } as any, 100);
+  assert.equal(p.memes.length, 1);
+  assert.equal(p.memes[0].display, "corner-overlay");
+});
+
+test("sanitizePlan passes through valid memes unchanged", () => {
+  const meme = { start: 1, end: 3, query: "shocked cat", display: "pip-bounce" };
+  const p = sanitizePlan({ index: 0, start: 0, end: 20, memes: [meme] } as any, 100);
+  assert.deepEqual(p.memes, [meme]);
+});

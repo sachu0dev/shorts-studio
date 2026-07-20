@@ -80,3 +80,63 @@ test("renderClip produces a valid mp4 for every layout template using a syntheti
     assert.ok(existsSync(outPath), `${layoutTemplate} did not produce an output file`);
   }
 });
+
+test("renderClip composites a meme overlay into a compound layout filter_complex", { timeout: 120_000 }, async () => {
+  // renderClip's meme-compositing branch (filter_complex with named pads from the
+  // layout filter chained into overlay filters) never executes in the layout-template
+  // smoke test above (its samplePlan always has memes: []). Exercise it for real here
+  // with a synthetic source + synthetic "meme" video, using "blurred-fill" as the layout
+  // since it's the compound multi-stage filter (split/named pads/`;`) the review flagged
+  // as highest risk to compose incorrectly alongside meme overlay filters.
+  const dir = mkdtempSync(path.join(tmpdir(), "render-meme-test-"));
+  const { execFileSync } = await import("node:child_process");
+
+  const sourcePath = path.join(dir, "source.mp4");
+  execFileSync("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "testsrc=duration=5:size=1280x720:rate=30",
+    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+    "-t", "5", "-c:v", "libx264", "-c:a", "aac", sourcePath,
+  ]);
+
+  const memeSourcePath = path.join(dir, "meme.mp4");
+  execFileSync("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "color=red:size=320x240:duration=1:rate=30",
+    "-c:v", "libx264", memeSourcePath,
+  ]);
+  const memeBytes = readFileSync(memeSourcePath);
+
+  // fetchMemeAsset (called internally by renderClip with no injectable opts) hits the
+  // real Giphy API + global fetch by default. Monkey-patch global.fetch for the duration
+  // of this test so its default fetchFn path resolves to our synthetic local meme file
+  // without any network call — same fake-response idiom memes.test.ts already uses.
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.GIPHY_API_KEY;
+  process.env.GIPHY_API_KEY = "test-fake-key";
+  (globalThis as any).fetch = (async (url: string) => {
+    if (url.includes("api.giphy.com")) {
+      return new Response(JSON.stringify({
+        data: [{ images: { original: { mp4: "https://giphy.example/meme.mp4" } } }],
+      }));
+    }
+    if (url === "https://giphy.example/meme.mp4") {
+      return new Response(memeBytes);
+    }
+    throw new Error("unexpected fetch url in test: " + url);
+  }) as unknown as typeof fetch;
+
+  try {
+    const plan = samplePlan({
+      start: 0,
+      end: 3,
+      layoutTemplate: "blurred-fill",
+      captions: [{ start: 0, end: 2, text: "test **word**" }],
+      memes: [{ start: 0, end: 1, query: "shocked cat", display: "corner-overlay" }],
+    });
+    const outPath = await renderClip(sourcePath, plan, dir, () => {});
+    assert.ok(existsSync(outPath), "meme-compositing render did not produce an output file");
+  } finally {
+    (globalThis as any).fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.GIPHY_API_KEY;
+    else process.env.GIPHY_API_KEY = originalApiKey;
+  }
+});
