@@ -43,7 +43,7 @@ export type MemeDisplayMode =
 export interface MemeOverlay {
   start: number;   // seconds, relative to clip start
   end: number;
-  query: string;   // Tenor search term
+  query: string;   // Giphy search term
   display: MemeDisplayMode;
 }
 
