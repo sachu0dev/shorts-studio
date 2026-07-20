@@ -95,7 +95,7 @@ export async function renderClip(
   for (const meme of plan.memes) {
     const assetPath = await fetchMemeAsset(meme.query);
     if (assetPath) resolvedMemes.push({ meme, assetPath });
-    else onLine(`⚠️ Meme fetch skipped for "${meme.query}" — no result or missing TENOR_API_KEY`);
+    else onLine(`⚠️ Meme fetch skipped for "${meme.query}" — no result or missing GIPHY_API_KEY`);
   }
 
   if (resolvedMemes.length === 0) {
