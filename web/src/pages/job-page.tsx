@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronDown, Download } from "lucide-react";
+import { AlertTriangle, ChevronDown, Download, Terminal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -38,8 +38,13 @@ export function JobPage({ jobId }: { jobId: string }) {
     return unsubscribe;
   }, [jobId]);
 
+  // Radix ScrollArea scrolls an inner viewport element, not the root or the
+  // content div — scrolling either of those silently does nothing.
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    const viewport = logRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport],[data-slot=scroll-area-viewport]"
+    );
+    if (viewport) viewport.scrollTop = viewport.scrollHeight;
   }, [job?.log.length]);
 
   const failed = job?.status === "error";
@@ -118,11 +123,20 @@ export function JobPage({ jobId }: { jobId: string }) {
       )}
 
       {job.log.length > 0 && (
-        <ScrollArea className="h-44 rounded-md border bg-muted/30">
-          <div ref={logRef} className="p-3 font-mono text-xs text-muted-foreground whitespace-pre-wrap">
-            {job.log.slice(-80).join("\n")}
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Terminal className="size-3.5" />
+            <span>Pipeline log</span>
+            <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+              {job.log.length}
+            </Badge>
           </div>
-        </ScrollArea>
+          <ScrollArea ref={logRef} className="h-[28rem] rounded-md border bg-muted/30">
+            <div className="p-3 font-mono text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+              {job.log.slice(-400).join("\n")}
+            </div>
+          </ScrollArea>
+        </div>
       )}
 
       {job.outputs && job.outputs.length > 0 && (
