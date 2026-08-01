@@ -57,6 +57,16 @@ ASD (phase 8) is the rescue and does work — re-running the same clip with
 does not run or fails degrades all the way back to a centre crop rather than to
 something merely worse.
 
+> **Amendment (live feedback, before this phase was built):** ASD correctly
+> identifying a speaker is **not** by itself a reason to switch away from a
+> panel. A reality-show or panel format's value is partly in everyone's
+> reactions — the point of the shot is the room, not just whoever has the
+> floor for three seconds. `camera-switch` cutting tight on every speaker
+> change in an 8-person panel would lose exactly the content a human editor
+> keeps. Rule 1 below is revised: on a panel specifically, a switch has to be
+> earned by a *sustained* turn, not merely a *current* one. Two-person
+> podcasts are unaffected — turn-taking there stays exactly as phase 9 built it.
+
 ## Scope
 
 Routing policy for clips with faces. The speaker-priority rule, the replacement
@@ -71,21 +81,33 @@ consumed here, neither is built here. `screen-rec` routing stays phase 11's.
 
 ### The rule, in priority order
 
-Exactly what the report asked for, made deterministic:
+Made deterministic, and revised once for the reaction-preserving amendment
+above — **a panel earns a switch differently than a two-person conversation
+does:**
 
 ```
-1. ASD names an active speaker for this segment
-     → frame that speaker           (camera-switch, narrowest safe aspect)
-2. Two speakers genuinely overlap
-     → split-screen                 (phase 10, unchanged)
-3. Otherwise — nobody identified, several people present
-     → keep everyone               (group-crop at narrowest aspect clearing retention)
-4. One face only
+1. Two speakers genuinely overlap
+     → split-screen                       (phase 10, unchanged)
+2. Exactly two people, one is talking
+     → camera-switch on that speaker      (phase 9, unchanged — same min-hold)
+3. Three or more people (a panel), and one person has held the floor for
+   PANEL_MONOLOGUE_SECONDS or longer — a real turn, not a quick reply
+     → camera-switch on that speaker      (narrowest safe aspect)
+4. Three or more people, and nobody has held the floor that long —
+   including "someone is talking right now, just not for very long"
+     → keep everyone                      (group-crop, narrowest safe aspect)
+5. Nobody identified at all, several people present
+     → keep everyone                      (group-crop, narrowest safe aspect)
+6. One face only
      → static-center / fullscreen-follow  (phase 7, unchanged)
 ```
 
-Rule 3 is the new one and the one that fixes the bug. Its answer to "I do not
-know who is talking" is *show the whole panel*, not *point at the middle*.
+Rules 4 and 5 are what fix the bug: "I do not know who is talking" and "several
+people are talking briefly" both resolve to *show the whole panel*, not *point
+at the middle* and not *chase every three-second reply around the room*. Rule 3
+is deliberately a **higher bar** than rule 2's ordinary turn-taking threshold —
+see `PANEL_MONOLOGUE_SECONDS` below — because a panel's switch has to be worth
+losing everyone else's reaction for.
 
 ### `server/pipeline/router.ts` — the conservative branch stops being blind
 
@@ -122,13 +144,39 @@ stops being what unlocks the mode.
 is meaningless. Add the count guard:
 
 ```
-medianConcurrentFaces >= 3 and no single dominant speaker
+medianConcurrentFaces >= 3 and no sustained dominant speaker
   → ["group-crop", "camera-switch"]
 ```
 
-"Dominant" reuses phase 8's `speakingTracks` — if one track holds the floor for
-most of the segment, framing them is right even in a crowd. That is a panel host
-delivering a verdict, and cutting to them is exactly what a human editor does.
+**"Dominant" means a real monologue, not merely the current speaker.** A panel
+member answering in the group's normal turn-taking rhythm does not earn a
+switch — the group shot is correct there, reactions and all. Only someone who
+has genuinely taken over the conversation does:
+
+```ts
+export const PANEL = {
+  /**
+   * How long one person has to hold the floor, uninterrupted, before a panel
+   * switches to them specifically. Deliberately well above phase 9's ordinary
+   * `minHold` (2.5s calm / 1.5s dynamic) — a two-person switch only has to
+   * beat "was that a real turn or a backchannel"; a panel switch has to beat
+   * "is losing everyone else's reaction worth it", which is a higher bar.
+   * Starting value, moved only when the corpus says so.
+   */
+  monologueSeconds: 6.0,
+};
+```
+
+Reuses `speakingTracks`' underlying per-track speaking-time measurement from
+phase 8/10 — the same "how long has this track actually been talking"
+computation `speakerRetentionOver` and `speakingTracks` already do, just
+compared against `PANEL.monologueSeconds` instead of
+`ASD_THRESHOLDS.minSpeakingSeconds`. No new detection machinery, a different
+bar for an existing measurement.
+
+A panel host delivering a closing verdict, or a contestant on an extended
+answer, clears this bar and gets cut to — that is exactly what a human editor
+does. A quick "yeah, totally" does not, and the group shot holds through it.
 
 ### `classify.ts` — say why confidence is low
 

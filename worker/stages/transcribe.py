@@ -87,6 +87,34 @@ def romanize(text: str) -> str:
     )
 
 
+#  whisperx's own `detect_language()` always reads `audio[:N_SAMPLES]` — the
+#  FIRST 30 seconds, hardcoded (see whisperx/asr.py). A huge share of Indian
+#  YouTube videos open with an English sponsor read or a cold-open intro line,
+#  so that single window locks the WHOLE transcript to English even when the
+#  rest of the video is Hinglish — wrong decoding throughout, and phase 2's
+#  wav2vec2 alignment model gets picked for the wrong language too.
+LANG_SAMPLE_SECONDS = 30
+LANG_SAMPLE_FRACTIONS = (0.25, 0.5, 0.75)  # skip the cold open and any outro/CTA
+
+
+def _detect_language(model, audio) -> str:
+    """Vote across a few points spread through the real duration, not just the
+    first 30s. `detect_language` only runs the encoder on one mel-spectrogram
+    chunk, so sampling three of them is cheap next to a full transcription."""
+    window = LANG_SAMPLE_SECONDS * SAMPLE_RATE
+    if len(audio) <= window:
+        return model.detect_language(audio)
+
+    votes = []
+    for frac in LANG_SAMPLE_FRACTIONS:
+        start = min(len(audio) - window, max(0, int(len(audio) * frac) - window // 2))
+        votes.append(model.detect_language(audio[start : start + window]))
+    print(f"[transcribe] language votes across the clip: {votes}", flush=True)
+    # majority; an even 3-way split falls back to the middle sample as the
+    # most representative single point rather than an arbitrary pick
+    return max(set(votes), key=votes.count) if len(set(votes)) < len(votes) else votes[len(votes) // 2]
+
+
 def transcribe(audio, device: str):
     """Walks the VRAM ladder. Returns (result, tier)."""
     import whisperx
@@ -96,7 +124,8 @@ def transcribe(audio, device: str):
         try:
             print(f"[transcribe] loading {name} ({compute_type})", flush=True)
             model = whisperx.load_model(name, device, compute_type=compute_type)
-            result = model.transcribe(audio, batch_size=batch_size)
+            language = _detect_language(model, audio)
+            result = model.transcribe(audio, batch_size=batch_size, language=language)
             del model
             _free()
             return result, f"{name}/{compute_type}"
@@ -221,6 +250,42 @@ def main(d: Path) -> dict:
     }
 
 
+def _self_test() -> None:
+    import numpy as np
+
+    class FakeModel:
+        def __init__(self, answers):
+            self.answers = answers
+            self.calls = 0
+
+        def detect_language(self, audio):
+            lang = self.answers[self.calls % len(self.answers)]
+            self.calls += 1
+            return lang
+
+    long_audio = np.zeros(200 * SAMPLE_RATE, dtype="float32")  # well past the 3-sample split
+
+    # a wrong cold-open guess ("en") is outvoted by the two real samples
+    assert _detect_language(FakeModel(["en", "hi", "hi"]), long_audio) == "hi"
+    # unanimous
+    assert _detect_language(FakeModel(["hi", "hi", "hi"]), long_audio) == "hi"
+    # a 3-way split falls back to the middle (most representative) sample, not vote order
+    assert _detect_language(FakeModel(["en", "hi", "ta"]), long_audio) == "hi"
+
+    # audio no longer than one window is never split
+    short_audio = np.zeros(10 * SAMPLE_RATE, dtype="float32")
+    m = FakeModel(["en"])
+    assert _detect_language(m, short_audio) == "en"
+    assert m.calls == 1
+
+    print("[transcribe] self-test ok")
+
+
 if __name__ == "__main__":
-    d, out = run_stage("transcribe", main)
-    write_json(d, "transcript.json", out)
+    import sys
+
+    if "--self-test" in sys.argv:
+        _self_test()
+    else:
+        d, out = run_stage("transcribe", main)
+        write_json(d, "transcript.json", out)
