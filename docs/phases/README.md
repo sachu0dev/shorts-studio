@@ -41,23 +41,31 @@ Input is **manual for all of Block A and B** — you paste the URL at
 ## Build order ≠ phase number
 
 **Phase numbers are stable file IDs, not a schedule.** Renumbering would break
-every cross-reference in 29 documents to express something a single list says
-better.
+every cross-reference in 32 documents to express something a single list says
+better. **This list is that single source of truth — read it first, build the
+topmost unbuilt row, and do not infer the order from the numbers.**
 
-Block A runs in order. Two of Block D's phases are pulled forward to sit **early
-in Block A** rather than after Block C:
+### Execution queue
 
-```
-   6 … 10   Block A continues            ← 6-10 built
-→  29  Content retention signal          measure what a crop throws away
-→  30  Adaptive framing window           let the window be wider than 9:16
-→  31  Panel framing & speaker priority  fix the centre-crop-on-a-panel defect
-   11 … 13  Block A resumes
-→  24  Source catalog + telemetry store  the DB everything else records into
-→  28  Operations dashboard              the surface that makes the later gates answerable
-   14 … 23  as planned
-   25 … 27  quality gate → multi-channel → performance loop
-```
+| # | Phase | Why it sits here |
+|---|---|---|
+| ✅ | 0–10 | built — artifact store → split-screen renderer |
+| **1** | **[29 — Content retention signal](phase-29-content-retention.md)** | **← START HERE.** Measures what a crop discards, over any time range. Changes no rendered frame |
+| 2 | [30 — Adaptive framing window](phase-30-adaptive-framing.md) | Per-segment 9:16 ⇄ 4:3 ⇄ 16:9. Needs 29's number |
+| 3 | [31 — Panel framing & speaker priority](phase-31-panel-framing.md) | Fixes the live centre-crop defect. Needs 30's wide window |
+| 4 | [11 — Gaming composition](phase-11-gaming.md) | Resumes the original Block A. Cheaper after 30 delivers `blurred-fill` |
+| 5 | [12 — LLM taste layer](phase-12-llm-taste.md) | Per-segment taste, on top of a framing layer that is finally correct |
+| 6 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
+| 7 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
+| 8 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
+| 9 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **Blocked until 29–31 pass** |
+| 10 | 16 … 23 | Block C — local models, Content Hunt, scripts. **Blocked until 29–31 pass** |
+| 11 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
+
+Two rules that outrank the table: **finish the phase you are on before starting
+the next** (a half-built phase is worse than an unstarted one), and **update the
+status table below when a gate passes**, so the next session starts from fact
+rather than from this paragraph.
 
 **Why 29–31 jump the queue.** They fix a reproduced defect in live output, not a
 missing feature. On corpus job `vI57GWdQo5` clip 2 — an eight-person talent-show
@@ -96,9 +104,12 @@ performance loop needs published clips to learn from.
 
 ## How this is run
 
+0. **Read the execution queue above and take the topmost unbuilt row.** Never
+   pick the next phase by number.
 1. Build the phase. Nothing outside its scope.
 2. Run its gate. If it fails, refine — do not start the next phase.
-3. Update the status table below.
+3. Update **both** the execution queue and the status table below, then commit.
+   A gate that passed but was not recorded costs the next session a re-derivation.
 
 Every phase file has the same shape: **Goal · Why now · Scope · Out of scope ·
 Changes · Contracts · Gate · Tests · Risks**.

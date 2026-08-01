@@ -1,9 +1,15 @@
 # Shorts Studio — agent brief
 
 Paste a YouTube link → fully auto-edited Short. Node/TS control plane today; a
-Python media plane is being added phase by phase. See `docs/phases/README.md`
-for what is being built and in what order. **Build one phase at a time, refine
-it until its gate passes, then start the next.**
+Python media plane is being added phase by phase. **Build one phase at a time,
+refine it until its gate passes, then start the next.**
+
+**What to build next lives in the execution queue in
+`docs/phases/README.md` — take the topmost unbuilt row. Phase numbers are file
+IDs, not a schedule; never pick the next phase by number.** Phases 0–10 are
+built; 29 → 30 → 31 come next (framing correctness), *then* 11 → 13 resumes the
+original Block A. Upload (14–15) and Content Hunt (16–23) are blocked until
+29–31 pass.
 
 ## Reference documents
 
