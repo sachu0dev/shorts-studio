@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { retentionOver, speakerRetentionOver, narrowestSafe, summarizeRetention, CANDIDATE_ASPECTS, RETENTION } from "./retention.js";
+import {
+  retentionOver, speakerRetentionOver, narrowestSafe, summarizeRetention, cropWidthFor, CANDIDATE_ASPECTS, RETENTION,
+} from "./retention.js";
 import type { FaceTrack } from "./signals.js";
 
 const W = 1920, H = 1080;
@@ -109,4 +111,22 @@ test("summarizeRetention includes speakerRetention only when ASD data is given",
   const s = summarizeRetention(tracks, W, H, 4, activeTrack, 0.25)!;
   assert.ok(s.speakerRetention);
   assert.equal(s.speakerRetention!["9:16"], 1);
+});
+
+// ── phase 30: cropWidthFor per aspect ───────────────────────────────────────────
+
+test("cropWidthFor widens monotonically from 9:16 to 16:9 on a 16:9 source", () => {
+  const widths = CANDIDATE_ASPECTS.map((a) => cropWidthFor(W, H, a));
+  for (let i = 1; i < widths.length; i++) assert.ok(widths[i] > widths[i - 1], `${CANDIDATE_ASPECTS[i]} did not widen`);
+  assert.ok(Math.abs(widths[0] - 9 / 16 / (W / H)) < 1e-9, "9:16 regressed from the pre-phase-30 formula");
+  assert.equal(cropWidthFor(W, H, "16:9"), 1, "16:9 on a 16:9 source should be the whole frame");
+});
+
+test("a wide window on a 9:16 source still clamps to 1 — never exceeds the frame", () => {
+  for (const a of CANDIDATE_ASPECTS) assert.equal(cropWidthFor(1080, 1920, a), 1);
+});
+
+test("cropWidthFor defaults to 9:16 and never NaNs on an unknown source", () => {
+  assert.equal(cropWidthFor(0, 0), Math.min(1, 9 / 16));
+  assert.equal(cropWidthFor(0, 0, "16:9"), 1);
 });

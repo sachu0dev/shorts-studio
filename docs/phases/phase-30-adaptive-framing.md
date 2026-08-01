@@ -1,5 +1,12 @@
 # Phase 30 — Adaptive framing window
 
+**Status: built.** Gates 1, 2, 4, 5, 6, 8, 9 pass — gate 8 measured (1.21× phase
+10 baseline, under the 1.3× budget). Gate 3's mechanism is verified two ways
+(unit tests, and a synthetic end-to-end render with three visually-confirmed
+aspects in one clip) but unexercised on real corpus footage — no available
+clip has an internal scene cut. Gate 7 (captions vs. the letterbox seam) is
+deferred to phase 13 per this doc's own scope note. See "What actually happened".
+
 **Goal:** the framing window's aspect ratio becomes a per-segment decision —
 9:16, 1:1, 4:3 or 16:9 — so wide content stops being amputated to fit a tall
 crop.
@@ -241,3 +248,81 @@ Python `render.py --self-test`:
 | Aspect changes look like a bug to viewers | Only at segment boundaries, which are cuts — the same rule phase 9 used for camera jumps |
 | Blurred fill looks cheap on every clip | It only appears when the alternative is cropping someone out; gate 2 keeps it off clips that do not need it |
 | Old artifacts break | `frameAspect` optional and defaulted to 9:16; gate 9 asserts it |
+
+## What actually happened
+
+### A real, independent bug surfaced mid-implementation: `static-center` assumed the frame centre instead of measuring it
+
+While wiring `buildFramedPath`, the natural refactor made `static-center`
+ignore `target` entirely — matching the *pre-existing* behaviour (`router.ts`'s
+old ternary hardcoded `cx: 0.5` for this mode, unconditionally). Live feedback
+during the session rejected this outright: a subject who genuinely isn't
+centred must not be cropped by a camera that never looked at where they are.
+
+This was a real defect independent of phase 30's own scope, caught only
+because the refactor made it visible in one place. Fixed with a new
+`staticCenter(track, cropWidth)` (`camera.ts`) — one still keyframe on the
+track's own measured midpoint, the same algorithm `groupCenter` already used
+for a whole group, just for one subject. Verified with a dedicated test
+(`static-center holds on an off-centre subject instead of cropping them out at
+0.5`) at both the unit level and through `buildComposition` end to end.
+
+### Gate 1 turns out to be true today, for a reason worth stating plainly
+
+The panel clip (`vI57GWdQo5` clip 2) still routes to `static-center` — phase
+31 hasn't landed, so nothing changed *which* mode it gets. But
+`cropWidthFor(1920, 1080, "16:9")` clamps to exactly `1.0` on a 16:9 source:
+the window *is* the full frame width, so the camera path's horizontal
+position stops mattering. Running the real stored artifact through
+`buildComposition` today:
+
+```
+mode: static-center
+layoutTimeline: [{ t0: 0, t1: 46.5, frameAspect: '16:9', fill: 'blur',
+                    reason: 'retention 0.422 at 9:16 — widened to 16:9' }]
+```
+
+All eight panelists are visible in the rendered frame **today**, one phase
+before the mode itself was supposed to change. Phase 31 still matters — it
+decides *where in that full-width frame to place emphasis* (a speaker, or the
+group) — but the content-loss bug this block exists to fix is already gone for
+this clip.
+
+### Gate 3's mechanism verified two ways; real-footage confirmation waits on a clip with a mid-clip cut
+
+Every locally available corpus analysis (`Kvg0L1U0w0`, `BFgmpWALTo`,
+`vI57GWdQo5`) has zero internal scene cuts, so every real clip resolves to
+exactly one `layoutTimeline` segment and — correctly, not as a bug — one
+aspect. Multi-aspect-in-one-clip is the phase's headline claim, so it was
+verified two other ways instead:
+
+- **Unit tests** drive `assignFrameAspects` directly over hand-built
+  multi-segment timelines (solo → crowd → solo), including the two-condition
+  min-hold and the speaker-retention override.
+- **A synthetic end-to-end render** — three segments, three aspects (9:16,
+  16:9 with blur fill, 4:3 with black fill) — rendered through the real
+  `render.py` pipeline and inspected frame by frame: 9:16 fills the canvas
+  exactly (the phase 10 no-op case), 16:9 shows the full sharp frame with a
+  blurred continuation top and bottom, 4:3 shows true black bars. All three
+  centred correctly, no seam artefacts.
+
+### Gate 8, measured rather than assumed
+
+A 20 s, 1920×1080 synthetic clip at a fixed 9:16 aspect (the sensitive case,
+since the canvas pipe now moves 3.2× the bytes phase 10's crop-only pipe did):
+phase 10's baseline (`crop=608x1080` pipe) rendered in 4088 ms; phase 30's
+canvas pipe (`canvas=1080x1920`, going through `_fit_and_fill`'s no-op stretch
+path) rendered in 4958 ms — **1.21×**, inside the 1.3× budget. The clip-width
+pipe fallback described in the doc was not needed.
+
+### A rounding artefact almost broke the "9:16 is a no-op" guarantee
+
+`_window_width`'s even-rounding of the crop width (matching phase 6/7's
+original `crop_w` formula) leaves a 1-2 px gap between the crop's true aspect
+and exactly 9:16 once scaled to the canvas. The first version of
+`_fit_and_fill` treated that gap as "needs a letterbox," which would have
+put a barely-visible blur sliver on **every** clip this pipeline has ever
+rendered — the opposite of a no-op. Fixed with a tolerance check (`abs(sh -
+OUT_H) <= 4`) that falls back to a plain stretch, matching the old
+encoder-side `scale=1080:1920` exactly. Caught by the self-test before it
+reached real footage.

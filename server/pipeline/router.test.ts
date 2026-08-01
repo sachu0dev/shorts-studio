@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { route, buildComposition, cropWidthFor, ROUTE_THRESHOLDS, type LayoutMode } from "./router.js";
+import {
+  route, buildComposition, cropWidthFor, assignFrameAspects, ASPECT, ROUTE_THRESHOLDS, type LayoutMode, type LayoutSegment,
+} from "./router.js";
 import type { Signals, AnalysisArtifact } from "./signals.js";
 import type { CompositionType } from "./classify.js";
 import type { AsdArtifact } from "./binding.js";
@@ -117,6 +119,20 @@ test("static-center emits a constant path, so the renderer has one code path", (
   const c = buildComposition("clip1", 10, analysis({ signals: sig({ subjectMotion: 0.006 }) }), "calm", () => {});
   assert.equal(c.mode, "static-center");
   assert.deepEqual(c.cameraPath, [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }]);
+});
+
+test("static-center holds on an off-centre subject instead of cropping them out at 0.5", () => {
+  const offCenter = analysis({
+    signals: sig({ subjectMotion: 0.006 }),
+    faceTracks: [{ id: 7, firstSeen: 0, lastSeen: 10, samples: [
+      { t: 0, cx: 0.82, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 },
+      { t: 10, cx: 0.82, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 },
+    ] }],
+  });
+  const c = buildComposition("clip1", 10, offCenter, "calm", () => {});
+  assert.equal(c.mode, "static-center");
+  assert.equal(c.cameraPath.length, 1);
+  assert.ok(Math.abs(c.cameraPath[0].cx - 0.82) < 1e-6, `expected the camera on the subject at 0.82, got ${c.cameraPath[0].cx}`);
 });
 
 test("the layout timeline breaks at every scene cut and marks the jump", () => {
@@ -261,4 +277,85 @@ test("split-screen targets are ordered by first-seen and stable for the whole cl
   const c = buildComposition("clip1", 10, a, "calm", () => {}, bothSpeaking());
   const splitSeg = c.layoutTimeline.find((s) => s.mode === "split-screen");
   assert.deepEqual(splitSeg?.targets, [7, 4]);
+});
+
+// ── phase 30: adaptive framing window ──────────────────────────────────────────
+
+const SRC_W = 1920, SRC_H = 1080;
+
+function trackAt(id: number, cx: number, t0: number, t1: number, w = 0.1) {
+  const samples = [];
+  for (let t = t0; t < t1 - 1e-9; t += 0.25) samples.push({ t, cx, cy: 0.5, w, h: 0.2, conf: 0.9 });
+  return { id, firstSeen: t0, lastSeen: t1, samples };
+}
+
+const SEG30 = (t0: number, t1: number, mode: LayoutMode = "camera-switch"): LayoutSegment => ({ t0, t1, mode });
+
+test("a single centred speaker stays at 9:16 — narrowest wins when it is already safe", () => {
+  const out = assignFrameAspects([SEG30(0, 10)], [trackAt(1, 0.5, 0, 10)], SRC_W, SRC_H);
+  assert.equal(out[0].frameAspect, "9:16");
+});
+
+test("two faces spread wide clear the retention floor only at 16:9", () => {
+  const tracks = [trackAt(1, 0.05, 0, 10), trackAt(2, 0.95, 0, 10)];
+  const out = assignFrameAspects([SEG30(0, 10)], tracks, SRC_W, SRC_H);
+  assert.equal(out[0].frameAspect, "16:9");
+});
+
+test("no tracks never guesses a wide aspect — 9:16 by default", () => {
+  const out = assignFrameAspects([SEG30(0, 10)], [], SRC_W, SRC_H);
+  assert.equal(out[0].frameAspect, "9:16");
+});
+
+test("assignFrameAspects only adds fields — segment boundaries and count are untouched", () => {
+  const segs = [SEG30(0, 4), SEG30(4, 9), SEG30(9, 10)];
+  const out = assignFrameAspects(segs, [trackAt(1, 0.5, 0, 10)], SRC_W, SRC_H);
+  assert.deepEqual(out.map((s) => [s.t0, s.t1]), [[0, 4], [4, 9], [9, 10]]);
+});
+
+test("a brief crowd cutaway does not earn a widen — too short on both sides of the hold", () => {
+  // Wide crowd for only 2s inside a long solo segment: neither the prior 9:16
+  // run nor the crowd window itself clears ASPECT.minHold.
+  const solo = trackAt(1, 0.5, 0, 10);
+  const crowdA = trackAt(2, 0.05, 4, 6);
+  const crowdB = trackAt(3, 0.95, 4, 6);
+  const segs = [SEG30(0, 4), SEG30(4, 6), SEG30(6, 10)];
+  const out = assignFrameAspects(segs, [solo, crowdA, crowdB], SRC_W, SRC_H, undefined, undefined, ASPECT.minHold);
+  assert.deepEqual(out.map((s) => s.frameAspect), ["9:16", "9:16", "9:16"]);
+});
+
+test("a sustained crowd shot survives ASPECT.minHold on both sides and commits", () => {
+  const solo = trackAt(1, 0.5, 0, 5);
+  const crowdA = trackAt(2, 0.05, 5, 15);
+  const crowdB = trackAt(3, 0.95, 5, 15);
+  const out = assignFrameAspects(
+    [SEG30(0, 5), SEG30(5, 15)], [solo, crowdA, crowdB], SRC_W, SRC_H, undefined, undefined, ASPECT.minHold
+  );
+  assert.equal(out[0].frameAspect, "9:16");
+  assert.equal(out[1].frameAspect, "16:9");
+});
+
+test("speakerRetention below its floor forces an immediate widen inside ASPECT.minHold", () => {
+  // A long 9:16 close-up, then a brief 2s cutaway where nine bystanders cluster
+  // centre-frame and the talking speaker sits at the far edge — the window
+  // that keeps the most FACES keeps the cluster and drops the speaker. 2s is
+  // nowhere near ASPECT.minHold, but holding 9:16 anyway crops who is talking.
+  const speaker = trackAt(1, 0.95, 0, 20);
+  const bystanders = Array.from({ length: 9 }, (_, i) => trackAt(10 + i, 0.5, 8, 10));
+  const activeTrack = Array.from({ length: 80 }, () => 1); // speaker talks the whole clip, 20s @ 4Hz
+  const out = assignFrameAspects(
+    [SEG30(0, 8), SEG30(8, 10), SEG30(10, 20)],
+    [speaker, ...bystanders], SRC_W, SRC_H, activeTrack, 0.25, ASPECT.minHold
+  );
+  assert.notEqual(out[1].frameAspect, "9:16", "held 9:16 through a segment that crops the active speaker");
+});
+
+test("frameAspect is buildComposition's real output, not just the unit-level function", () => {
+  const wide = analysis({
+    signals: sig({ subjectMotion: 0.006 }),
+    faceTracks: [trackAt(7, 0.05, 0, 10), trackAt(8, 0.95, 0, 10)],
+  });
+  const c = buildComposition("clip1", 10, wide, "calm", () => {});
+  assert.equal(c.layoutTimeline[0].frameAspect, "16:9");
+  assert.deepEqual(c.canvas, { w: 1080, h: 1920 });
 });

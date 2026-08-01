@@ -1,11 +1,17 @@
 import type { Signals, FaceTrack, AnalysisArtifact } from "./signals.js";
 import type { CompositionType } from "./classify.js";
 import {
-  buildCameraPath, buildSwitchPath, buildSplitPath, groupCenter, primaryTrack, PRESETS,
+  buildFramedPath, buildSplitPath, primaryTrack, PRESETS,
   type CameraKeyframe, type PresetName,
 } from "./camera.js";
 import { activeTrackIn, speakingTracks, type AsdArtifact, type SpeakerBinding } from "./binding.js";
 import { buildLayoutTimeline, buildSplitAwareTimeline } from "./timeline.js";
+import {
+  cropWidthFor, retentionOver, speakerRetentionOver, narrowestSafe, RETENTION,
+  type FrameAspect,
+} from "./retention.js";
+
+export { cropWidthFor } from "./retention.js";
 
 export type LayoutMode =
   | "static-center"
@@ -114,6 +120,9 @@ export function route(sig: Signals, type: CompositionType, confidence: number): 
   }
 }
 
+/** How the remainder of the canvas is filled when the window is wider than 9:16. */
+export type Fill = "blur" | "black";
+
 export interface LayoutSegment {
   t0: number;
   t1: number;
@@ -130,6 +139,14 @@ export interface LayoutSegment {
   /** `split-screen` only: the two tracks shown, index 0 on top. Order is fixed for the whole clip. */
   targets?: [number, number];
   arrangement?: "stacked";
+  /**
+   * Window aspect for this segment (phase 30). Absent means `"9:16"`, so
+   * artifacts written before this phase still read correctly.
+   */
+  frameAspect?: FrameAspect;
+  fill?: Fill;
+  /** Why this aspect — the retention number that earned or blocked a widen. */
+  reason?: string;
 }
 
 export interface Composition {
@@ -142,7 +159,13 @@ export interface Composition {
   mode: LayoutMode;
   fallbackReason?: string;
   preset: PresetName;
-  /** Normalized width of the 9:16 window in source coordinates. */
+  /**
+   * The published file's fixed dimensions (phase 30) — never anything else, so
+   * a wide `frameAspect` window is letterboxed into this, not shipped as a
+   * landscape file. A Short is 1080x1920; only the framing window moves.
+   */
+  canvas: { w: number; h: number };
+  /** Normalized width of the default 9:16 window in source coordinates. */
   cropWidth: number;
   layoutTimeline: LayoutSegment[];
   cameraPath: CameraKeyframe[];
@@ -162,10 +185,90 @@ export interface Composition {
   sampleStep?: number;
 }
 
-/** The 9:16 window as a fraction of source width; 1 if the source is already tall. */
-export function cropWidthFor(sourceWidth: number, sourceHeight: number): number {
-  if (!sourceWidth || !sourceHeight) return 9 / 16;
-  return Math.min(1, (9 / 16) / (sourceWidth / sourceHeight));
+/** The published file's fixed dimensions — see `Composition.canvas`. */
+export const CANVAS = { w: 1080, h: 1920 };
+
+export const ASPECT = {
+  /**
+   * Minimum time at one aspect before it may change again (phase 30). A
+   * resize is a heavier event than a target switch — phase 9's ordinary
+   * `minHold` governs *who* is framed, this governs the *shape* of the frame
+   * — so it is deliberately longer. Without it, a conversation alternating
+   * between a close-up and a group shot would breathe 9:16 → 4:3 → 9:16 every
+   * couple of seconds. Starting value, moved only when the corpus says so.
+   */
+  minHold: 5.0,
+};
+
+/**
+ * `frameAspect` + `fill` for every segment, decided from the retention that
+ * segment's OWN time range measures — one clip can open 9:16 on a close-up,
+ * widen to 4:3 when a group enters, and return, because retention is a
+ * function of `[t0,t1)`, not of the clip (phase 29).
+ *
+ * `ASPECT.minHold` gives this the same two-condition inertia phase 9's
+ * `buildLayoutTimeline` uses for target switches: the current aspect must
+ * have earned its hold, and the challenger's own run must itself clear the
+ * bar — consecutive segments wanting the same new aspect count as one run.
+ * The one exception is `speakerRetention`: if holding would put the active
+ * speaker outside the frame, it widens immediately regardless of the hold.
+ *
+ * `split-screen` segments are untouched — phase 10's half-crop geometry
+ * assumes a fixed 9:16-derived window.
+ */
+export function assignFrameAspects(
+  segments: LayoutSegment[],
+  tracks: FaceTrack[],
+  sourceWidth: number,
+  sourceHeight: number,
+  activeTrack?: (number | null)[],
+  sampleStep?: number,
+  minHold: number = ASPECT.minHold
+): LayoutSegment[] {
+  if (!segments.length) return segments;
+
+  const ideal: FrameAspect[] = segments.map((s) =>
+    s.mode === "split-screen"
+      ? "9:16"
+      : narrowestSafe(tracks, sourceWidth, sourceHeight, s.t0, s.t1, activeTrack, sampleStep)
+  );
+
+  const out: LayoutSegment[] = [];
+  let committed = ideal[0];
+  let committedSince = segments[0].t0;
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.mode !== "split-screen" && ideal[i] !== committed) {
+      let j = i;
+      let runEnd = seg.t0;
+      while (j < segments.length && segments[j].mode !== "split-screen" && ideal[j] === ideal[i]) {
+        runEnd = segments[j].t1;
+        j++;
+      }
+      const challengerRun = runEnd - seg.t0;
+      const heldLongEnough = seg.t0 - committedSince >= minHold;
+      const speakerViolation =
+        !!activeTrack &&
+        sampleStep != null &&
+        speakerRetentionOver(tracks, sourceWidth, sourceHeight, seg.t0, seg.t1, committed, activeTrack, sampleStep) <
+          RETENTION.speakerFloor;
+
+      if (speakerViolation || (heldLongEnough && challengerRun >= minHold)) {
+        committed = ideal[i];
+        committedSince = seg.t0;
+      }
+    }
+
+    const aspect = seg.mode === "split-screen" ? "9:16" : committed;
+    const r916 = retentionOver(tracks, sourceWidth, sourceHeight, seg.t0, seg.t1, "9:16");
+    const reason =
+      aspect === "9:16"
+        ? `retention ${r916.toFixed(3)} at 9:16`
+        : `retention ${r916.toFixed(3)} at 9:16 — widened to ${aspect}`;
+    out.push({ ...seg, frameAspect: aspect, fill: "blur", reason });
+  }
+  return out;
 }
 
 /**
@@ -227,15 +330,15 @@ export function buildComposition(
     log(`${clipId}: ⚠️ ${fallbackReason}`);
   }
 
-  const cropWidth = cropWidthFor(analysis?.sourceWidth ?? 0, analysis?.sourceHeight ?? 0);
+  const sourceWidth = analysis?.sourceWidth ?? 0;
+  const sourceHeight = analysis?.sourceHeight ?? 0;
+  const cropWidth = cropWidthFor(sourceWidth, sourceHeight);
   const cuts = analysis?.signals.sceneCuts ?? [];
 
   // Segment boundaries are the scene cuts: a segment that starts at one is a
   // jump, and saying so in the artifact is what makes "did it pan across a cut"
   // answerable without watching the video.
   let layoutTimeline: LayoutSegment[];
-  let cameraPath: CameraKeyframe[];
-  let splitPath: { top: CameraKeyframe[]; bottom: CameraKeyframe[] } | undefined;
   let heldSegments = 1;
   let suppressedSwitches = 0;
 
@@ -245,18 +348,12 @@ export function buildComposition(
     );
     ({ heldSegments, suppressedSwitches } = tl);
     layoutTimeline = tl.segments;
-    // A split-aware timeline still has plain `camera-switch` segments wherever
-    // only one target is talking, so both path builders run over the same
-    // segment list — each only contributes keyframes for the mode it owns.
-    cameraPath = buildSwitchPath(layoutTimeline, tracks, cropWidth, preset);
-    splitPath = buildSplitPath(layoutTimeline, tracks, splitTargets, cropWidth, preset);
   } else if (mode === "camera-switch" && canSwitch && asd) {
     const tl = buildLayoutTimeline(
       asd.activeTrack, asd.sampleStep, cuts, duration, mode, track?.id ?? null, preset.minHold
     );
     ({ heldSegments, suppressedSwitches } = tl);
     layoutTimeline = tl.segments;
-    cameraPath = buildSwitchPath(layoutTimeline, tracks, cropWidth, preset);
   } else {
     const bounds = [0, ...cuts.filter((c) => c > 0 && c < duration), duration];
     layoutTimeline = [];
@@ -275,14 +372,20 @@ export function buildComposition(
       });
     }
     heldSegments = layoutTimeline.length;
-    cameraPath =
-      mode === "fullscreen-follow" ? buildCameraPath(track, cuts, duration, cropWidth, preset)
-      : mode === "group-crop" ? groupCenter(tracks, cropWidth)
-      : [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
   }
 
+  // phase 30: the window's aspect is a per-segment decision, from every
+  // branch above — a camera-switch clip can open 9:16 on a close-up and widen
+  // for a group shot exactly the same way a group-crop clip can.
+  layoutTimeline = assignFrameAspects(layoutTimeline, tracks, sourceWidth, sourceHeight, asd?.activeTrack, asd?.sampleStep);
+  const cameraPath = buildFramedPath(layoutTimeline, tracks, sourceWidth, sourceHeight, preset);
+  const splitPath =
+    mode === "split-screen" && splitTargets
+      ? buildSplitPath(layoutTimeline, tracks, splitTargets, cropWidth, preset)
+      : undefined;
+
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     heldSegments,
     suppressedSwitches,
     clipId,
@@ -292,6 +395,7 @@ export function buildComposition(
     mode,
     fallbackReason,
     preset: presetName,
+    canvas: CANVAS,
     cropWidth,
     layoutTimeline,
     cameraPath,

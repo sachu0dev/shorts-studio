@@ -1,5 +1,6 @@
 import type { FaceTrack } from "./signals.js";
 import type { LayoutSegment } from "./router.js";
+import { cropWidthFor } from "./retention.js";
 
 export interface CameraKeyframe {
   t: number;
@@ -204,32 +205,42 @@ export function sliceTrack(track: FaceTrack, t0: number, t1: number): FaceTrack 
 }
 
 /**
- * `camera-switch`: follow one face per segment, and **cut** between segments.
+ * The camera path for ANY `layoutTimeline`: one keyframe run per segment,
+ * built with that segment's own `frameAspect`-derived window width, stitched
+ * with the cut-preserving boundary keyframe below. `static-center`,
+ * `fullscreen-follow`, `group-crop`, `camera-switch` and `split-screen`'s
+ * fallback path all go through this one function — a segment's aspect
+ * changing is exactly the same "boundary event" a target switch already was,
+ * so unifying them costs nothing and is why phase 30 needed no second
+ * stitcher next to phase 9's.
  *
  * Panning between two people two metres apart reads as a rendering bug, not a
- * style. The cut is expressed as two keyframes sharing a timestamp — the old
- * position and the new one — which the renderer's interpolator resolves to a
- * jump because the span between them is zero. That keeps one interpolator in
- * `render.py` rather than a second "is this a cut" code path.
+ * style. A `camera-switch` cut is expressed as two keyframes sharing a
+ * timestamp — the old position and the new one — which the renderer's
+ * interpolator resolves to a jump because the span between them is zero. That
+ * keeps one interpolator in `render.py` rather than a second "is this a cut"
+ * code path, and an aspect change rides the same jump for free.
  *
  * Scene cuts are not passed down to the per-segment paths: a segment already
  * begins at every cut, so a snap inside one is impossible by construction.
  */
-export function buildSwitchPath(
+export function buildFramedPath(
   segments: LayoutSegment[],
   tracks: FaceTrack[],
-  cropWidth: number,
+  sourceWidth: number,
+  sourceHeight: number,
   preset: SmoothingPreset
 ): CameraKeyframe[] {
   const byId = new Map(tracks.map((t) => [t.id, t]));
   const out: CameraKeyframe[] = [];
 
   for (const seg of segments) {
+    const cropWidth = cropWidthFor(sourceWidth, sourceHeight, seg.frameAspect ?? "9:16");
     const full = seg.target != null ? byId.get(seg.target) ?? null : null;
-    const local = buildCameraPath(
-      full && sliceTrack(full, seg.t0, seg.t1),
-      [], seg.t1 - seg.t0, cropWidth, preset
-    );
+    const local =
+      seg.mode === "group-crop" ? groupCenter(tracks, cropWidth)
+      : seg.mode === "static-center" ? staticCenter(full, cropWidth)
+      : buildCameraPath(full && sliceTrack(full, seg.t0, seg.t1), [], seg.t1 - seg.t0, cropWidth, preset);
     // Hold the previous position right up to the boundary, then jump. Only
     // needed when the previous segment's last keyframe fell short of it, which
     // happens whenever a segment length is not a whole number of steps.
@@ -270,13 +281,29 @@ export function buildSplitPath(
 }
 
 /**
+ * `static-center`: one still keyframe on wherever the subject **actually is**,
+ * not an assumed frame centre. The router only chooses this when
+ * `subjectMotion` is near zero, so one fixed position is correct — but that
+ * position has to be measured. Assuming 0.5 crops an off-centre subject out
+ * of a window that never moved to find them, which defeats the entire point
+ * of measuring faces at all.
+ */
+export function staticCenter(track: FaceTrack | null, cropWidth: number): CameraKeyframe[] {
+  const xs = track?.samples.map((s) => s.cx) ?? [];
+  if (!xs.length) return [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
+  const half = Math.min(cropWidth, 1) / 2;
+  const mid = (Math.min(...xs) + Math.max(...xs)) / 2;
+  return [{ t: 0, cx: r4(Math.min(1 - half, Math.max(half, mid))), cy: 0.5, zoom: 1 }];
+}
+
+/**
  * `group-crop`: one window wide enough for everyone, held perfectly still.
  *
  * The router only reaches this mode when `facesFitOneCrop` is true — every
  * active face box inside one 9:16 window with ≥5% margin — so there is nothing
  * to follow and nothing to switch between. Centring on the group rather than on
- * the frame is the entire difference from `static-center`, and switching when a
- * single crop would work is a gimmick the system has to be able to decide against.
+ * one subject is the entire difference from `static-center`, and switching when
+ * a single crop would work is a gimmick the system has to be able to decide against.
  */
 export function groupCenter(tracks: FaceTrack[], cropWidth: number): CameraKeyframe[] {
   const xs = tracks.flatMap((t) => t.samples.map((s) => s.cx));

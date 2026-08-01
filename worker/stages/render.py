@@ -1,15 +1,23 @@
 """Composite frames in OpenCV, pipe them to NVENC.
 
-    NVDEC decode -> per-frame crop + composite -> raw BGR pipe -> ffmpeg NVENC
+    NVDEC decode -> per-frame crop + fit-and-fill -> raw BGR pipe -> ffmpeg NVENC
 
 Replaces the fixed ffmpeg `-vf` chain, and from phase 7 the crop window moves:
-`cameraPath` in `composition/<clipId>.json` says where the 9:16 window sits at
-every moment. `static-center` is the degenerate case — a constant path — so
-there is one code path here, not two.
+`cameraPath` in `composition/<clipId>.json` says where the window sits at every
+moment. `static-center` is the degenerate case — a constant path — so there is
+one code path here, not two.
 
-The pipe carries the CROP, not the full frame. It is ~1/3 the bytes of the
-composited output, and it means the upscale to 1080x1920 happens in the encoder
-alongside the caption burn rather than in this loop.
+**Canvas vs. window (phase 30).** The published file is always the OUT_W x
+OUT_H canvas — that is what a Short is. The framing WINDOW into the source can
+be any of `ASPECT_RATIO`, decided per segment in `layoutTimeline`, and does not
+have to fill the canvas: `_fit_and_fill` scales it to the canvas width, centres
+it vertically, and fills whatever's left with blur (default) or black. A 9:16
+window fills the canvas exactly, so this is a no-op for every clip phase 10
+already rendered correctly.
+
+The pipe carries the CANVAS, not the crop — it has to, once the window's own
+size varies per segment and can no longer feed a fixed-size pipe. Compositing
+therefore finishes in this loop rather than in the encoder's filter graph.
 
 Two things deliberately stay in ffmpeg:
   * **Captions.** The burned `.ass` file is correct and fast; reimplementing ASS
@@ -34,9 +42,13 @@ from _base import read_json, run_stage, write_json
 
 OUT_W, OUT_H = 1080, 1920
 FPS = 30
-# Everything is decoded to this height; the crop window is 9:16 of it.
+# Everything is decoded to this height; the crop window is a fraction of it.
 WORK_H = 1080
 FREEZE_SEC = 0.6  # freeze-frame-callout, matching the old tpad stop_duration
+
+# phase 30: the framing WINDOW's aspect, independent of the OUT_W x OUT_H
+# CANVAS. Mirrors server/pipeline/retention.ts's ASPECT_RATIO exactly.
+ASPECT_RATIO = {"9:16": 9 / 16, "1:1": 1.0, "4:3": 4 / 3, "16:9": 16 / 9}
 
 # (hwaccel, video encoder, encoder options) tried in order. systemCheck proved
 # NVENC exists in phase 0, but a driver that refuses at runtime must cost a
@@ -270,6 +282,55 @@ def composite_split(
     return np.vstack([top, bot])
 
 
+def _window_width(src_w: int, src_h: int, dec_w: int, aspect: str) -> int:
+    """Crop width in decoded-frame pixels for `aspect` — the same normalized
+    fraction `server/pipeline/retention.ts`'s `cropWidthFor` computes, using the
+    real source dimensions rather than the decode-derived proxy."""
+    ratio = ASPECT_RATIO.get(aspect, ASPECT_RATIO["9:16"])
+    frac = min(1.0, ratio / (src_w / src_h))
+    return max(2, min(dec_w, round(frac * dec_w / 2) * 2))
+
+
+def _fit_and_fill(crop: np.ndarray, fill: str) -> np.ndarray:
+    """Scale a source-window crop to the OUT_W x OUT_H canvas and centre it
+    vertically; fill whatever's left with a blurred, zoomed copy of the same
+    crop (default) or solid black.
+
+    A 9:16 window already fills the canvas exactly (`sh == OUT_H`), so this is
+    a no-op resize for every clip phase 10 already rendered correctly — the
+    canvas and the window only diverge once phase 30 widens the window.
+    """
+    ch, cw = crop.shape[:2]
+    scale = OUT_W / cw
+    sh = max(1, round(ch * scale))
+
+    # Close enough to the canvas aspect that any gap is rounding noise, not a
+    # real letterbox — stretch straight to the canvas, matching the old
+    # encoder-side `scale=1080:1920` exactly rather than inventing a 1-2px fill
+    # band nothing asked for. `_window_width`'s even-rounding of crop widths is
+    # exactly what produces this noise for a "9:16" window.
+    if abs(sh - OUT_H) <= 4:
+        return cv2.resize(crop, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+
+    scaled = cv2.resize(crop, (OUT_W, sh), interpolation=cv2.INTER_LINEAR)
+    if sh > OUT_H:
+        y0 = (sh - OUT_H) // 2
+        return np.ascontiguousarray(scaled[y0 : y0 + OUT_H])
+
+    if fill == "black":
+        canvas = np.zeros((OUT_H, OUT_W, 3), np.uint8)
+    else:
+        # ponytail: blur at 1/8 scale then upscale — same trick as
+        # fx_blurred_fill; a background blur has no detail left to lose.
+        small = cv2.resize(crop, (max(1, cw // 8), max(1, ch // 8)), interpolation=cv2.INTER_AREA)
+        small = cv2.GaussianBlur(small, (0, 0), max(1.0, 2.5 * cw / OUT_W))
+        canvas = cv2.resize(small, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+
+    y0 = (OUT_H - sh) // 2
+    canvas[y0 : y0 + sh] = scaled
+    return canvas
+
+
 # ── render ────────────────────────────────────────────────────────────────────
 
 
@@ -310,8 +371,8 @@ def _read_exact(stream, view: memoryview) -> bool:
     return True
 
 
-def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
-    """One decode->crop->composite->encode pass. Returns (frames, crop width)."""
+def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> int:
+    """One decode->crop->composite->fit->encode pass. Returns the frame count."""
     source = str((d / comp["source"]).resolve())
     out = str((d / comp["out"]).resolve())
     Path(out).parent.mkdir(parents=True, exist_ok=True)
@@ -320,8 +381,6 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
 
     src_w, src_h = _source_size(source)
     dec_w = max(2, round(src_w * WORK_H / src_h / 2) * 2)
-    crop_w = min(dec_w, round(WORK_H * OUT_W / OUT_H / 2) * 2)
-    frame_bytes = dec_w * WORK_H * 3
     path = comp.get("cameraPath") or []
     timeline = comp.get("layoutTimeline") or []
     split_path = comp.get("splitPath") or {}
@@ -341,7 +400,10 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
 
     enc_cmd = [
         "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error",
-        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{crop_w}x{WORK_H}", "-r", str(FPS), "-i", "-",
+        # phase 30: the pipe carries the CANVAS, not the crop — a per-segment
+        # window width cannot feed a fixed-size pipe, and `_fit_and_fill`
+        # already leaves every frame at OUT_W x OUT_H before it is queued.
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{OUT_W}x{OUT_H}", "-r", str(FPS), "-i", "-",
         # Audio comes straight from the source; only the video was rebuilt.
         "-ss", start, "-to", end, "-i", source,
     ]
@@ -369,7 +431,6 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
     effects = comp.get("effects") or []
     freeze = any(e.get("template") == "freeze-frame-callout" for e in effects)
     ctx = {"contentMode": comp.get("contentMode")}
-    max_x = dec_w - crop_w
 
     # Frames go out on a writer thread. Reading and writing from one thread
     # serializes two pipes that should overlap — the decoder idles while we block
@@ -409,6 +470,13 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
                 while timeline and seg_idx + 1 < len(timeline) and timeline[seg_idx]["t1"] <= t:
                     seg_idx += 1
                 seg = timeline[seg_idx] if timeline else None
+                # Absent frameAspect/fill means an old composition or no timeline
+                # at all — 9:16 + blur is the phase 10 behaviour, preserved.
+                aspect = (seg.get("frameAspect") if seg else None) or "9:16"
+                fill = (seg.get("fill") if seg else None) or "blur"
+                crop_w = _window_width(src_w, src_h, dec_w, aspect)
+                max_x = dec_w - crop_w
+
                 if seg and seg.get("mode") == "split-screen" and seg.get("targets"):
                     active = None
                     if active_track is not None:
@@ -423,6 +491,7 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
                 for e in effects:
                     if e["t0"] <= t < e["t1"]:
                         f = EFFECTS.get(e["template"], fx_fullscreen)(f, t - e["t0"], ctx)
+                f = _fit_and_fill(f, fill)
                 outbox.put(f if f.flags["C_CONTIGUOUS"] else np.ascontiguousarray(f))
                 if freeze:
                     last = f
@@ -451,7 +520,7 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
             raise RuntimeError(f"decoder produced no frames ({tail(dec_err) or 'no stderr'})")
         if enc.returncode != 0:
             raise RuntimeError(f"encoder {venc} exited {enc.returncode}: {tail(enc_err) or 'no stderr'}")
-    return n, crop_w
+    return n
 
 
 def main(d: Path) -> dict:
@@ -467,10 +536,11 @@ def main(d: Path) -> dict:
     last_error = None
     for hwaccel, venc, venc_opts in ATTEMPTS:
         try:
-            n, crop_w = _pump(comp, d, hwaccel, venc, venc_opts)
+            n = _pump(comp, d, hwaccel, venc, venc_opts)
+            aspects = sorted({s.get("frameAspect", "9:16") for s in comp.get("layoutTimeline") or []}) or ["9:16"]
             print(
                 f"[render] {clip_id}: {n} frames, mode={comp.get('mode', 'static-center')}, "
-                f"crop={crop_w}x{WORK_H}, decoder={hwaccel or 'cpu'}, encoder={venc}",
+                f"canvas={OUT_W}x{OUT_H}, aspects={aspects}, decoder={hwaccel or 'cpu'}, encoder={venc}",
                 flush=True,
             )
             return {
@@ -552,6 +622,33 @@ def _self_test() -> None:
     dimmed = composite_split(split_frame, top_path, bot_path, 0.0, sw, sw, 2, (1, 2))
     assert dimmed[0, 0].mean() < out[0, 0].mean(), "inactive (top) half was not dimmed when track 2 is talking"
     assert np.array_equal(dimmed[-1], out[-1]), "active half was dimmed too"
+
+    # phase 30: a 9:16 window on a 16:9 source is byte-identical to the phase 10
+    # crop width, and _fit_and_fill on it is a true no-op (fills the canvas
+    # exactly, nothing to blend).
+    crop_w_916 = _window_width(1920, 1080, 1920, "9:16")
+    assert crop_w_916 == min(1920, round(WORK_H * OUT_W / OUT_H / 2) * 2), "9:16 window width regressed"
+    narrow = np.random.default_rng(1).integers(0, 256, (WORK_H, crop_w_916, 3)).astype(np.uint8)
+    fitted = _fit_and_fill(narrow, "blur")
+    assert fitted.shape == (OUT_H, OUT_W, 3)
+    resized = cv2.resize(narrow, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+    assert np.array_equal(fitted, resized), "9:16 fit-and-fill was not a plain stretch, like the old encoder-side scale"
+
+    # a 16:9 window is much wider than the canvas is tall once scaled to OUT_W,
+    # so it must be centred with fill above and below, not stretched to fill.
+    crop_w_169 = _window_width(1920, 1080, 1920, "16:9")
+    wide = np.random.default_rng(2).integers(0, 256, (WORK_H, crop_w_169, 3)).astype(np.uint8)
+    blurred = _fit_and_fill(wide, "blur")
+    assert blurred.shape == (OUT_H, OUT_W, 3)
+    sh = round(WORK_H * OUT_W / crop_w_169)
+    y0 = (OUT_H - sh) // 2
+    assert y0 > 0, "16:9 window should be shorter than the canvas once scaled"
+    # blur reduces local variance — same check `fx_blurred_fill` uses above —
+    # so the fill band must be smoother than the sharp framed band beneath it.
+    assert blurred[:10].std() < blurred[y0 : y0 + 10].std(), "fill band was not blurred"
+    black = _fit_and_fill(wide, "black")
+    assert black[0].max() == 0, "black fill top band was not true black"
+    assert black[-1].max() == 0, "black fill bottom band was not true black"
 
     print("[render] self-test ok")
 

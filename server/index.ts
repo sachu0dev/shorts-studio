@@ -403,7 +403,7 @@ async function runPipeline(job: Job) {
     const composeStage: Stage<void, Composition> = {
       name: `compose:${clipId}`,
       output: `composition/${clipId}.json`,
-      schemaVersion: 4, // 4: split-screen timelines (phase 10)
+      schemaVersion: 5, // 5: per-segment frameAspect + canvas (phase 30)
       async run() {
         return buildComposition(
           clipId, plan.end - plan.start, analyses.get(clipId) ?? null, PRESET, log, asds.get(clipId) ?? null
@@ -415,6 +415,10 @@ async function runPipeline(job: Job) {
     log(`${clipId}: ${c.mode} (${c.preset}) — ${c.routedReason}`);
     if (c.mode === "camera-switch" || c.mode === "split-screen") {
       log(`${clipId}: ${c.heldSegments} segment(s), ${c.suppressedSwitches} switch(es) suppressed by min-hold`);
+    }
+    const aspects = [...new Set(c.layoutTimeline.map((s) => s.frameAspect ?? "9:16"))];
+    if (aspects.length > 1 || aspects[0] !== "9:16") {
+      log(`${clipId}: window widened to ${aspects.join(" → ")} — see layoutTimeline[].reason`);
     }
   }
 

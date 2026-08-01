@@ -4,7 +4,7 @@ export type FrameAspect = "9:16" | "1:1" | "4:3" | "16:9";
 
 export const CANDIDATE_ASPECTS: FrameAspect[] = ["9:16", "1:1", "4:3", "16:9"];
 
-const ASPECT_RATIO: Record<FrameAspect, number> = { "9:16": 9 / 16, "1:1": 1, "4:3": 4 / 3, "16:9": 16 / 9 };
+export const ASPECT_RATIO: Record<FrameAspect, number> = { "9:16": 9 / 16, "1:1": 1, "4:3": 4 / 3, "16:9": 16 / 9 };
 
 export const RETENTION = {
   /** Starting value, moved only when the corpus says so — see phase 29 doc. */
@@ -13,11 +13,18 @@ export const RETENTION = {
   speakerFloor: 0.99,
 };
 
-/** Window width as a fraction of source width; 1 if the source is already narrower. */
-function windowFraction(sourceW: number, sourceH: number, aspect: FrameAspect): number {
-  if (!sourceW || !sourceH) return 1;
-  return Math.min(1, ASPECT_RATIO[aspect] / (sourceW / sourceH));
+/**
+ * The framing window as a fraction of source width; 1 if the source is
+ * already narrower than the window. `aspect` defaults to `"9:16"` so every
+ * caller from before phase 30 (a fixed window) keeps working unchanged.
+ */
+export function cropWidthFor(sourceW: number, sourceH: number, aspect: FrameAspect = "9:16"): number {
+  const ratio = ASPECT_RATIO[aspect];
+  if (!sourceW || !sourceH) return Math.min(1, ratio);
+  return Math.min(1, ratio / (sourceW / sourceH));
 }
+
+const windowFraction = cropWidthFor;
 
 /**
  * Below this many samples in range, a "track" is a fleeting misdetection, not a

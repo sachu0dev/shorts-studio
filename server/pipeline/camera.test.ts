@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildCameraPath, buildSwitchPath, buildSplitPath, groupCenter, primaryTrack, PRESETS, SPLIT_HALF_HEIGHT } from "./camera.js";
+import { buildCameraPath, buildFramedPath, buildSplitPath, groupCenter, staticCenter, primaryTrack, PRESETS, SPLIT_HALF_HEIGHT } from "./camera.js";
 import type { FaceTrack } from "./signals.js";
 
 const CROP = 0.3164; // a 9:16 window on a 16:9 source
+const SRC_W = 1920, SRC_H = 1080; // a 16:9 source — cropWidthFor(..., "9:16") === CROP
 
 /** A track whose horizontal centre follows `cxAt`, sampled at 4 Hz. */
 function track(duration: number, cxAt: (t: number) => number, id = 1): FaceTrack {
@@ -95,7 +96,7 @@ const SEG = (t0: number, t1: number, target?: number) =>
 test("switching between two people is a cut, not a pan", () => {
   const a = track(10, () => 0.25, 1);
   const b = track(10, () => 0.75, 2);
-  const p = buildSwitchPath([SEG(0, 5, 1), SEG(5, 10, 2)], [a, b], CROP, PRESETS.calm);
+  const p = buildFramedPath([SEG(0, 5, 1), SEG(5, 10, 2)], [a, b], SRC_W, SRC_H, PRESETS.calm);
 
   // two keyframes share t=5: the old position and the new one. The renderer's
   // interpolator resolves a zero span to a jump, so nothing pans between them.
@@ -108,7 +109,7 @@ test("switching between two people is a cut, not a pan", () => {
 });
 
 test("a segment whose target has no track still yields a renderable path", () => {
-  const p = buildSwitchPath([SEG(0, 5, 99), SEG(5, 10)], [], CROP, PRESETS.calm);
+  const p = buildFramedPath([SEG(0, 5, 99), SEG(5, 10)], [], SRC_W, SRC_H, PRESETS.calm);
   assert.ok(p.length > 0);
   assert.ok(p.every((k) => k.cx === 0.5), "expected a centred fallback");
 });
@@ -116,10 +117,23 @@ test("a segment whose target has no track still yields a renderable path", () =>
 test("the switch path covers every segment and stays inside the frame", () => {
   const a = track(12, () => 0.05, 1); // hard against the left edge
   const b = track(12, () => 0.95, 2);
-  const p = buildSwitchPath([SEG(0, 4, 1), SEG(4, 8, 2), SEG(8, 12, 1)], [a, b], CROP, PRESETS.dynamic);
+  const p = buildFramedPath([SEG(0, 4, 1), SEG(4, 8, 2), SEG(8, 12, 1)], [a, b], SRC_W, SRC_H, PRESETS.dynamic);
   const half = CROP / 2;
   assert.ok(p[0].t === 0 && p[p.length - 1].t >= 11.9);
   for (const k of p) assert.ok(k.cx >= half - 1e-9 && k.cx <= 1 - half + 1e-9, `cx ${k.cx}`);
+});
+
+test("static-center holds on the subject's actual position, not an assumed frame centre", () => {
+  // A subject sitting off to the right must not be cropped by a camera that
+  // assumes 0.5 and never bothers to look at the measured face.
+  const p = staticCenter(track(10, () => 0.8, 1), CROP);
+  assert.equal(p.length, 1);
+  assert.ok(Math.abs(p[0].cx - 0.8) < 1e-6, `expected 0.8, got ${p[0].cx}`);
+});
+
+test("static-center clamps to the frame and survives having no track at all", () => {
+  assert.equal(staticCenter(track(10, () => 0.02, 1), CROP)[0].cx, CROP / 2);
+  assert.deepEqual(staticCenter(null, CROP), [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }]);
 });
 
 test("group-crop is one still keyframe centred between the faces", () => {
@@ -183,7 +197,7 @@ test("a track missing for one half still yields a renderable path", () => {
 test("a segment that is not a whole number of steps still cuts rather than pans", () => {
   const a = track(10, () => 0.25, 1);
   const b = track(10, () => 0.75, 2);
-  const p = buildSwitchPath([SEG(0, 4.7, 1), SEG(4.7, 10, 2)], [a, b], CROP, PRESETS.calm);
+  const p = buildFramedPath([SEG(0, 4.7, 1), SEG(4.7, 10, 2)], [a, b], SRC_W, SRC_H, PRESETS.calm);
   const at = p.filter((k) => Math.abs(k.t - 4.7) < 1e-9);
   assert.equal(at.length, 2, `expected a hold and a jump at 4.7, got ${at.length}`);
   assert.ok(Math.abs(at[0].cx - 0.25) < 0.02 && Math.abs(at[1].cx - 0.75) < 0.02);
