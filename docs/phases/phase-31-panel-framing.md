@@ -63,8 +63,8 @@ something merely worse.
 > reactions — the point of the shot is the room, not just whoever has the
 > floor for three seconds. `camera-switch` cutting tight on every speaker
 > change in an 8-person panel would lose exactly the content a human editor
-> keeps. Rule 1 below is revised: on a panel specifically, a switch has to be
-> earned by a *sustained* turn, not merely a *current* one. Two-person
+> keeps. The rule below is revised: on a panel specifically, a switch has to
+> be earned by a *sustained* turn, not merely a *current* one. Two-person
 > podcasts are unaffected — turn-taking there stays exactly as phase 9 built it.
 
 ## Scope
@@ -196,26 +196,37 @@ the video.
 On the panel clip plus the corpus podcast and two solo sources:
 
 1. **The panel clip no longer renders `static-center`.** It renders `group-crop`
-   at a wide aspect, or `camera-switch` where ASD identifies a speaker.
-2. Where ASD names a speaker, `targetSource` is `asd` and the rendered frame is
-   on that person — spot-checked on three switches.
-3. Where ASD names nobody, every face present is inside the framed region.
+   at a wide aspect for its normal turn-taking, and `camera-switch` only on
+   whichever segments clear `PANEL.monologueSeconds`.
+2. **A brief reply inside a panel does not trigger a switch.** Construct a
+   segment where ASD names an active speaker for 2–3s inside a panel; it must
+   render `group-crop`, not `camera-switch` — this is the gate for the
+   amendment, and the one most worth watching regress.
+3. Where a speaker genuinely clears `PANEL.monologueSeconds`, `targetSource` is
+   `asd` and the rendered frame is on that person — spot-checked on three
+   sustained turns.
+4. Where ASD names nobody, every face present is inside the framed region.
    **Nobody is cropped out because the system was unsure.**
-4. A two-person podcast still gets `camera-switch`, not `group-crop`. The panel
-   fix must not flatten genuine turn-taking into a static wide shot.
-5. Solo clips are untouched — same mode, same aspect, same output as phase 10.
-6. A clip where ASD fails entirely still frames the group, never the centre.
+5. A two-person podcast still gets `camera-switch` at phase 9's ordinary
+   min-hold — **not** `PANEL.monologueSeconds`. The panel fix must not slow
+   down genuine two-person turn-taking.
+6. Solo clips are untouched — same mode, same aspect, same output as phase 10.
+7. A clip where ASD fails entirely still frames the group, never the centre.
    Degrading must land somewhere defensible.
-7. `speakerRetention` is ≥ its floor on every rendered segment. The person
+8. `speakerRetention` is ≥ its floor on every rendered segment. The person
    talking is never outside the frame — the one hard guarantee of this block.
 
 ## Tests
 
 `router.test.ts`:
 - 8 faces, no speaker labels, confidence 0.55 → **not** `static-center`
-- 3+ faces with no dominant speaker → `group-crop` before `camera-switch`
-- 3+ faces with one dominant speaker → `camera-switch` on that track
-- 2 faces turn-taking → `camera-switch` (phase 9 behaviour preserved)
+- 3+ faces, active speaker held for < `PANEL.monologueSeconds` → `group-crop`,
+  **not** `camera-switch` — the direct test for the amendment
+- 3+ faces, active speaker held for ≥ `PANEL.monologueSeconds` → `camera-switch`
+  on that track
+- 3+ faces with no dominant speaker at all → `group-crop` before `camera-switch`
+- 2 faces turn-taking → `camera-switch` at the **ordinary** phase 9 min-hold,
+  confirming `PANEL.monologueSeconds` does not leak into the 2-person path
 - 1 face, low confidence → `static-center` still, since it is correct there
 - ASD absent + several faces → group, never centre
 
@@ -226,7 +237,8 @@ On the panel clip plus the corpus podcast and two solo sources:
 
 | Risk | Mitigation |
 |---|---|
-| Panels now always go wide and static, losing energy | Rule 1 outranks rule 3 — a dominant speaker is still cut to. Gate 4 keeps podcasts switching |
+| Panels now always go wide and static, losing energy | Rule 3 still cuts to a sustained speaker — a host's verdict or a long answer. Gate 3 checks this directly, gate 2 checks the opposite |
+| `PANEL.monologueSeconds` (6s, a guess) is wrong in either direction | Starting value per this repo's convention; calibrate against the corpus podcast (must stay unaffected, gate 5) and panel (must start switching correctly, gate 3) before trusting it further |
 | `group-crop` at 16:9 makes faces small on a phone | Phase 30 picks the **narrowest** clearing aspect; 16:9 only when narrower loses people |
 | Removing the `facesFitOneCrop` gate changes phase 9 behaviour | It stays measured and asserted in existing tests; only its role as an unlock changes. Gate 4 and 5 cover the regression |
 | Dominance threshold invented rather than measured | Starts from phase 8's `speakingTracks` ordering, calibrated against the podcast and panel before the gate is called passed |
