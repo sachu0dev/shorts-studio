@@ -16,16 +16,24 @@ These were decided up front and every phase file assumes them:
 | 4 | `compositionType` is **measured**, `contentMode` is **LLM-chosen** | Two fields, one owner each. The LLM can never select a layout that's physically impossible. |
 | 5 | **Router frames, effects decorate** — the templates survive as a styling layer | Phase 6 ported 11 of 12 to OpenCV and dropped `speed-ramp`; phase 12 drives them per-segment. |
 | 6 | **Rights posture is per-job**, mix of owned and third-party | Phase 14 exists as its own feature before upload. |
-| 7 | **Canvas ≠ window.** The published canvas is always 1080×1920; the *framing window* into the source is 9:16 → 16:9 per segment | Phases 29–31 exist. A wide shot is letterboxed into the tall canvas, never shipped as a landscape file — a landscape master is not a Short. |
+| 7 | **Canvas ≠ window.** The published canvas is always 1080×1920; the *framing window* into the source is 9:16 → 16:9 and changes **per segment within a clip** | Phases 29–31 exist. One clip can open 9:16 on a close-up, widen to 4:3 when the panel enters, and return — the remainder of the tall canvas is filled with blur (default) or black. A wide shot is never shipped as a landscape file: that is not a Short. |
 
 ## Priority
 
 | Block | What | Phases |
 |---|---|---|
-| **A — CORE** | Paste a YouTube URL in the web UI → a Short good enough to publish | 0–13, 29–31 |
+| **A — CORE** | Paste a YouTube URL in the web UI → a Short good enough to publish | 0–13, **29–31** |
 | **B — UPLOAD** | That Short reaches your channel | 14–15 |
 | **C — LATER** | Local models, Content Hunt, scripts, SaaS | 16–23 |
 | **D — SELF-IMPROVING** | Record everything, judge it, publish to the right channel, learn from the result | 24–28 |
+
+**29–31 are core, and they block Blocks B and C.** Framing correctness is part of
+"good enough to publish", not a refinement after it. Uploading (14–15) or
+harvesting more sources (19–20) before the framing is right means publishing
+clips with half the cast cropped out and then discovering it at scale — the
+upload adapter has no opinion about whether a clip is well framed, and Content
+Hunt's whole value is finding more footage to run through this same pipeline.
+**Nothing in B or C starts until 29–31 pass their gates.**
 
 Input is **manual for all of Block A and B** — you paste the URL at
 `localhost:5177`. That already works and is not touched.
@@ -116,8 +124,8 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [8](phase-08-light-asd.md) | Light-ASD active speaker detection | A | **built** — gates 1/4 need diarization; ASD unblocks routing |
 | [9](phase-09-camera-switch.md) | camera-switch + group-crop | A | **built** — gate 4 restated; group-crop unexercised on real footage |
 | [10](phase-10-split-screen.md) | Split-screen renderer | A | **built** — gates 1/6 unexercised, no corpus footage with confirmed crosstalk |
-| [29](phase-29-content-retention.md) | Content retention signal | A | **next** — measures what a crop discards |
-| [30](phase-30-adaptive-framing.md) | Adaptive framing window (9:16 → 16:9) | A | planned — unblocks `blurred-fill` for phase 11 |
+| [29](phase-29-content-retention.md) | Content retention signal | A | **next** — measures what a crop discards, over any time range |
+| [30](phase-30-adaptive-framing.md) | Adaptive framing window, per segment | A | planned — mid-clip 9:16 ⇄ 4:3 ⇄ 16:9; unblocks `blurred-fill` for phase 11 |
 | [31](phase-31-panel-framing.md) | Panel framing & speaker priority | A | planned — fixes the reproduced centre-crop defect |
 | [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | planned |
 | [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | planned |

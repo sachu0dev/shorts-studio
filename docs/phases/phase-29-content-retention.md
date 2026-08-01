@@ -44,23 +44,55 @@ Phase 11's action region joins the same metric when it exists.
 
 ## Changes
 
-### `worker/stages/analyze_clip.py` — retention per candidate aspect
+### `server/pipeline/retention.ts` (new) — a function of a **time range**, not a clip
 
-Face boxes are already sampled at 4 Hz for the track builder. For each sampled
-moment and each candidate aspect, slide a window of that aspect's width and take
-the placement that retains the most **whole** face boxes — a face clipped in half
-counts as lost, because a half face on screen is the failure a viewer notices.
+This is the load-bearing design decision of the whole block, and getting it
+wrong makes phases 30 and 31 impossible.
 
+Retention must be answerable **over any `[t0, t1)`**, because the whole point is
+that one clip needs different framing at different moments: a solo close-up at
+9:16 for eight seconds, then 4:3 when the panel comes into shot. A single
+clip-level score would average those two situations into one number that
+describes neither, and the system would pick one aspect for the entire clip —
+which is barely better than today's fixed 9:16.
+
+So it is a pure function, not a stored scalar:
+
+```ts
+export const CANDIDATE_ASPECTS = ["9:16", "1:1", "4:3", "16:9"] as const;
+
+/** Fraction of face-appearances in [t0,t1) a window of `aspect` retains whole. */
+export function retentionOver(
+  tracks: FaceTrack[], sourceW: number, sourceH: number,
+  t0: number, t1: number, aspect: FrameAspect
+): number;
+
+/** Narrowest aspect clearing both floors over [t0,t1), or the widest candidate. */
+export function narrowestSafe(
+  tracks: FaceTrack[], sourceW: number, sourceH: number,
+  t0: number, t1: number, activeTrack?: (number|null)[], sampleStep?: number
+): FrameAspect;
 ```
-CANDIDATE_ASPECTS = (9/16, 1/1, 4/3, 16/9)
-```
 
-Four is enough. They are the framings an editor actually reaches for, and a
-continuous search would optimise a number nobody can perceive.
+**No Python change is needed.** `analysis/<clipId>.json` already carries
+`faceTracks[].samples[]` with `{t, cx, cy, w, h}` per 4 Hz sample — every input
+this metric needs is in the artifact today. Computing it in Node keeps it a pure
+unit-testable function with no GPU and no stage, exactly like phase 8 kept
+stabilisation and binding on the Node side.
 
-Cost is trivial — it runs over face boxes already in memory, not over pixels.
+For each sampled moment in the range, slide a window of the aspect's width and
+take the placement retaining the most **whole** face boxes. A face clipped in
+half counts as lost — a half face on screen is the failure a viewer notices.
 
-### `server/pipeline/signals.ts` — two numbers, not one
+Four candidate aspects is enough. They are the framings an editor actually
+reaches for, and a continuous search would optimise a number nobody can perceive.
+
+### `server/pipeline/signals.ts` — the clip-level summary, for visibility only
+
+The stored numbers are the whole-clip case of the same function. They exist so
+the failure is **visible** in `job.json` and the UI on every clip, including
+past ones. They are not what phase 30 reads — that calls `retentionOver` per
+segment.
 
 ```ts
 /** Fraction of face-appearances a window of this aspect retains whole. */
@@ -93,7 +125,8 @@ rather than only the artifact.
 
 ## Contracts
 
-`analysis/<clipId>.json`, `schemaVersion` 4:
+`analysis/<clipId>.json`, `schemaVersion` 4 — the **whole-clip** summary, which
+is the reporting surface, not the decision input:
 
 ```jsonc
 {
@@ -104,6 +137,11 @@ rather than only the artifact.
   }
 }
 ```
+
+Phase 30 calls `retentionOver(tracks, …, seg.t0, seg.t1, aspect)` per segment and
+will routinely reach a *different* answer than this row — a clip that summarises
+to 16:9 can still open with eight seconds of correct 9:16 close-up. That is the
+intended behaviour, not a disagreement to reconcile.
 
 ```ts
 export const RETENTION = {
@@ -142,9 +180,14 @@ export const RETENTION = {
 - a face straddling the window edge counts as **lost**, not partial
 - no faces → retention absent, not 0 (absent means unknown; 0 means measured empty)
 - `narrowestSafe` returns the *narrowest* clearing the floor, not the best-scoring
+- **the time-range test that the whole block rests on**: one track alone for
+  0–8 s, then eight tracks for 8–20 s → `retentionOver(…, 0, 8, "9:16") === 1.0`
+  while `retentionOver(…, 8, 20, "9:16") < 0.5`. If these two ranges return the
+  same number, per-segment framing is impossible and phase 30 cannot work
+- the whole-clip summary equals `retentionOver` over `[0, duration)`
 
-Python: eight synthetic boxes spread across a 16:9 frame reproduce the panel
-table's shape — 9:16 keeps roughly a third, 16:9 keeps all.
+Against the real artifact: `retentionOver` over the full panel clip reproduces
+the measured table within ±2%.
 
 ## Risks
 
