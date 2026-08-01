@@ -39,7 +39,7 @@ Block A runs in order. Two of Block D's phases are pulled forward to sit **early
 in Block A** rather than after Block C:
 
 ```
-   6 … 13   Block A continues            ← 6 and 7 built
+   6 … 13   Block A continues            ← 6-9 built
 →  24  Source catalog + telemetry store  the DB everything else records into
 →  28  Operations dashboard              the surface that makes the later gates answerable
    14 … 23  as planned
@@ -91,7 +91,7 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [24](phase-24-source-catalog.md) | Source catalog + telemetry store | D | planned |
 | [28](phase-28-dashboard.md) | Operations dashboard | D | planned |
 | [8](phase-08-light-asd.md) | Light-ASD active speaker detection | A | **built** — gates 1/4 need diarization; ASD unblocks routing |
-| [9](phase-09-camera-switch.md) | camera-switch + group-crop | A | planned |
+| [9](phase-09-camera-switch.md) | camera-switch + group-crop | A | **built** — gate 4 restated; group-crop unexercised on real footage |
 | [10](phase-10-split-screen.md) | Split-screen renderer | A | planned |
 | [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | planned |
 | [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | planned |

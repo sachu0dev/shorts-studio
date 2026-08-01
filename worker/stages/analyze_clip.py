@@ -33,6 +33,10 @@ MIN_TRACK_SECONDS = 0.5
 MAX_TRACK_GAP = 3
 IOU_MATCH = 0.3
 CENTROID_MATCH = 0.15
+# Cosine similarity of two face signatures required to carry a track ACROSS a
+# scene cut. 0.78 is the Youden-optimal split of the two measured populations
+# in face_signature's note — see build_tracks for why this exists at all.
+RE_ID_MATCH = 0.78
 
 MODEL = Path(__file__).resolve().parents[1] / "models" / "face_detection_yunet_2023mar.onnx"
 
@@ -110,9 +114,54 @@ def detect_faces(video: Path, start: float, end: float) -> tuple[list[list[dict]
                 "w": round(bw / w, 4),
                 "h": round(bh / h, 4),
                 "conf": round(score, 3),
+                # Underscore keys never reach the artifact — stripped in build_tracks.
+                "_look": face_signature(frame, x, y, bw, bh),
             })
         per_sample.append(dets)
     return per_sample, src_w, src_h
+
+
+# A 6x6 RGB thumbnail of the face box padded 2x, mean-removed and L2-normalized.
+# Crude on purpose: this is not recognition, it is "did the thing at this
+# position stop being the same thing" (see RE_ID_MATCH).
+#
+# The padding is what makes it work. Scored against 862 same-face pairs and 395
+# definitely-different pairs (two faces in one frame), three candidates:
+#
+#   6x6 RGB, 2x pad   J=0.82   <- this one
+#   10x10 grey, tight J=0.76
+#   8x8 hue/sat hist  J=0.73
+#
+# A tight grey crop of a face is mostly pose; hair, clothing and the bit of
+# background beside someone's head are what actually differ between two people
+# in the same room.
+SIG_PX = 6
+SIG_PAD = 0.5
+
+
+def face_signature(frame, x: float, y: float, bw: float, bh: float):
+    import cv2
+    import numpy as np
+
+    h, w = frame.shape[:2]
+    cx, cy = x + bw / 2, y + bh / 2
+    bw, bh = bw * (1 + 2 * SIG_PAD), bh * (1 + 2 * SIG_PAD)
+    x0, y0 = max(0, int(cx - bw / 2)), max(0, int(cy - bh / 2))
+    x1, y1 = min(w, int(cx + bw / 2)), min(h, int(cy + bh / 2))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    patch = cv2.resize(frame[y0:y1, x0:x1], (SIG_PX, SIG_PX), interpolation=cv2.INTER_AREA)
+    patch = patch.astype(np.float32).ravel()
+    patch -= patch.mean()
+    n = float(np.linalg.norm(patch))
+    return patch / n if n > 1e-6 else None
+
+
+def looks_like(a, b) -> float:
+    """Cosine similarity of two face signatures; 0 when either is missing."""
+    if a is None or b is None:
+        return 0.0
+    return float(a @ b)
 
 
 def _iou(a: dict, b: dict) -> float:
@@ -131,18 +180,32 @@ def _dist(a: dict, b: dict) -> float:
     return ((a["cx"] - b["cx"]) ** 2 + (a["cy"] - b["cy"]) ** 2) ** 0.5
 
 
-def build_tracks(per_sample: list[list[dict]]) -> list[dict]:
-    """IoU + centroid matching at 4 Hz.
+def build_tracks(per_sample: list[list[dict]], cuts: list[float] | None = None) -> list[dict]:
+    """IoU + centroid matching at 4 Hz, with appearance checked across cuts.
 
     Boring on purpose: ByteTrack/Kalman is available if the corpus demands it,
-    but this has no failure mode anyone has to debug at 3am. Phase 8's ASD
-    binding is what makes identity authoritative anyway.
+    but this has no failure mode anyone has to debug at 3am.
+
+    **Position alone cannot carry identity across a scene cut.** Measured on a
+    multi-cam window, 13 of 22 tracks spanned a cut and one covered two
+    different people — the tracker matched them because they happened to sit in
+    the same part of frame either side of the cut. Phase 9 then cuts to "that
+    speaker" and lands on someone else.
+
+    Retiring every track at every cut fixes that and breaks phase 7: a solo
+    window with 6 cuts in 25 s shatters into 7 fragments and the camera path
+    gets 4 s of track for a 25 s clip. So the cut only *gates* the match — a
+    track survives it when the face still looks like the same face.
     """
     tracks: list[dict] = []
     active: list[dict] = []
     next_id = 1
+    cuts = cuts or []
 
     for i, dets in enumerate(per_sample):
+        # Only samples that straddle a cut pay for the appearance check; inside
+        # a shot the tracker behaves exactly as it did in phase 4.
+        across_cut = any((i - 1) * SAMPLE_STEP < c <= i * SAMPLE_STEP for c in cuts)
         unmatched = list(dets)
         for tr in active:
             best, best_score = None, 0.0
@@ -153,6 +216,11 @@ def build_tracks(per_sample: list[list[dict]]) -> list[dict]:
                     score = IOU_MATCH  # close enough in space to count as the same face
                 if score > best_score:
                     best, best_score = d, score
+            if best is not None and best_score >= IOU_MATCH and across_cut and \
+                    looks_like(tr["samples"][-1].get("_look"), best.get("_look")) < RE_ID_MATCH:
+                # A different face in the same place. Retire rather than let the
+                # gap tolerance grab the newcomer two samples later.
+                best, tr["missed"] = None, MAX_TRACK_GAP + 1
             if best is not None and best_score >= IOU_MATCH:
                 tr["samples"].append({"t": round(i * SAMPLE_STEP, 3), **best})
                 tr["missed"] = 0
@@ -178,7 +246,8 @@ def build_tracks(per_sample: list[list[dict]]) -> list[dict]:
         first, last = tr["samples"][0]["t"], tr["samples"][-1]["t"]
         if last - first + SAMPLE_STEP < MIN_TRACK_SECONDS:
             continue  # flicker, not a face
-        out.append({"id": tr["id"], "firstSeen": first, "lastSeen": last, "samples": tr["samples"]})
+        samples = [{k: v for k, v in s.items() if not k.startswith("_")} for s in tr["samples"]]
+        out.append({"id": tr["id"], "firstSeen": first, "lastSeen": last, "samples": samples})
     return sorted(out, key=lambda t: t["firstSeen"])
 
 
@@ -256,8 +325,13 @@ def main(d: Path) -> dict:
         raise SystemExit("ingest.json missing or has no video")
     video = d / ingest["video"]
 
+    # Scene cuts gate cross-cut track identity. Read here rather than passed in
+    # from Node so the stage stays runnable on its own, like every other one.
+    scenes = read_json(d, "scenes.json") or {}
+    cuts = [c - args.start for c in scenes.get("cuts", []) if args.start < c < args.end]
+
     per_sample, src_w, src_h = detect_faces(video, args.start, args.end)
-    tracks = build_tracks(per_sample)
+    tracks = build_tracks(per_sample, cuts)
     signals = compute_signals(per_sample, tracks, src_w, src_h)
 
     print(f"[analyze_clip] {args.clip_id}: {len(per_sample)} samples, "

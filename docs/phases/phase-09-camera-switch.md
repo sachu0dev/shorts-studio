@@ -1,5 +1,10 @@
 # Phase 9 — camera-switch + group-crop
 
+**Status: built.** Gates 1, 2, 6, 7 pass. Gates 3 and 5 are covered by test
+only — no available footage exercises them. **Gate 4 does not hold as written
+and is restated.** See "What actually happened"; the inherited re-identification
+problem below is fixed.
+
 **Goal:** on multi-speaker footage, the camera cuts to whoever is talking — and
 knows when not to bother.
 
@@ -157,3 +162,134 @@ That last one is worth its own assertion. A gap in the timeline is a black frame
 | `group-crop` chosen when faces are too far apart | The ≥5% margin definition from phase 4; verify by eye on the corpus |
 | Timeline has a gap or overlap | Asserted directly in tests |
 | Switching feels mechanical even when correct | This is what phase 12's taste layer is for — don't over-tune here |
+
+---
+
+## What actually happened
+
+### The inherited defect is fixed: tracks now survive a cut only if the face does
+
+Phase 8 flagged that face track ids were not identity-stable across scene cuts —
+13 of 22 tracks in one multi-cam window spanned a cut and one covered two
+different people. Both candidate fixes were wrong on their own: retiring every
+track at a cut destroys phase 7, and doing nothing leaves `camera-switch` cutting
+confidently to the wrong person.
+
+The fix is a **gate, not a break**. `analyze_clip.py` now carries a cheap
+appearance signature per detection and a track only crosses a cut when the face
+still looks like the same face:
+
+- **Signature:** a 6×6 RGB thumbnail of the face box padded 2×, mean-removed and
+  L2-normalized. The padding is what makes it work — a tight grey crop of a face
+  is mostly pose, while hair, clothing and the slice of room beside someone's
+  head are what actually differ between two people in one shot.
+- **Threshold:** cosine ≥ 0.78, the Youden-optimal split measured over 862
+  same-face pairs and 395 definitely-different pairs (two faces detected in the
+  same frame — a label that needs no annotation).
+
+| descriptor | Youden J |
+|---|---|
+| **6×6 RGB, 2× pad** | **0.82** |
+| 10×10 grey, tight box | 0.76 |
+| 8×8 hue/saturation histogram | 0.73 |
+
+Verified by rendering the face crops either side of every surviving cross-cut
+boundary in the offending window: **all 10 pairs are the same person**, and the
+track that previously merged two people no longer does.
+
+Cost to everything else, measured over 7 clips from two sources:
+
+| | before | after |
+|---|---|---|
+| clips whose tracks changed at all | — | 2 of 7 |
+| longest track (worst case) | 117 samples | 110 |
+| `distinctFaceTracks` | — | **unchanged on all 7** |
+| `subjectMotion` | — | moved ≤0.008, never across the 0.04 routing threshold |
+
+So phase 7 is untouched, which was the whole reason the naive version was
+reverted.
+
+### `camera-switch` needs no renderer change, and that is the point
+
+A cut is expressed as **two camera keyframes sharing a timestamp** — the old
+position and the new one. `render.py`'s interpolator already resolves a zero
+span to a jump, so there is one interpolator rather than a second "is this a cut"
+code path. Asserted in `render.py --self-test`, so a future change to that
+function cannot silently turn every switch back into a pan.
+
+`group-crop` needed even less: the router only reaches it when `facesFitOneCrop`
+is true, which *means* everyone already fits one 9:16 window. So it is a single
+constant keyframe at the midpoint of the group — `static-center` centred on the
+people instead of on the frame. Deciding *against* switching is the feature.
+
+### Min-hold: two halves, and a deferral
+
+The plan's rule is "once a speaker is chosen, hold". Implemented literally, a
+switch arriving inside the hold window is dropped and never revisited — a
+speaker who takes over one second into a clip would never get the frame. So the
+rule is two separate conditions:
+
+- the **current** segment must have lasted `minHold` — rejections here are
+  *deferred*, and land the moment the hold expires;
+- the **challenger's** turn must itself last `minHold` — this is what kills the
+  one-word "yeah", and rejections here are dropped.
+
+`suppressedSwitches` counts rejected *turns*, not rejected samples; counting
+samples made a single 0.5 s backchannel read as 2 suppressed switches at 4 Hz.
+
+`minHold` moved onto the smoothing preset (**calm 2.5 s, dynamic 1.5 s**) rather
+than being a constant, which is what makes gate 7 measurable — "how twitchy is
+this edit" is precisely what a creator means by calm versus dynamic.
+
+### Gate 4 does not hold as written
+
+> *Switches align with real turn boundaries within ~0.3 s.*
+
+They cannot, and the reason is structural rather than a tuning miss:
+
+| source of lag | cost |
+|---|---|
+| ASD sample grid | 0.25 s |
+| phase 8 hysteresis (3 samples) | 0.75 s |
+| min-hold deferral | 0 – 2.5 s |
+
+The floor is **~1 s**, and that is the *correct* floor: 0.3 s alignment would
+require dropping the hysteresis that stops the seizure this phase exists to
+avoid. A late cut reads as an edit; an early one reads as a glitch. **Restated
+gate 4: no switch lands before its turn begins, and none lands more than
+min-hold + 1 s after it.**
+
+### Verified on real footage
+
+Built a `camera-switch` composition through the real router on a 46 s multi-cam
+window and rendered it. 1382 frames, 7.0 s wall, 541 MiB peak, `h264_nvenc`,
+`High / yuv420p` — the phase 6 colour fix survives. Frames sampled either side of
+all four switches show a clean jump to a differently-framed person with no
+intermediate pan.
+
+Two honest caveats from that run:
+
+- **`suppressedSwitches` was 0**, because on multi-cam footage the source has
+  already cut to whoever is talking, so the face tracks barely overlap in time
+  and there is rarely a competing candidate to suppress. Gate 5 is therefore
+  covered by test only until the corpus podcast (a genuine two-shot) is
+  available. The gate is not wrong — the footage just cannot exercise it, the
+  same lesson as phase 7's gate 4.
+- **`asdSpeakerCount` read 5** on a 2-person clip: cut fragmentation still
+  inflates the *count* of speaking tracks even though each track is now
+  identity-honest. Harmless where it is consumed — `classify()` only asks
+  0 / 1 / ≥2 — but it is not a person count and must not be used as one.
+
+### Gate 3 — `group-crop` is unexercised on real footage
+
+No available clip has `facesFitOneCrop` true; every multi-speaker window measured
+so far has the two faces further apart than one 9:16 window. Covered by unit test
+(chosen over switching, one keyframe, centred between the faces, clamped to the
+frame) but not yet seen rendered.
+
+### Tests
+
+`timeline.test.ts` — 12 cases, all seven from the plan plus the deferral, the
+preset comparison, duplicate/out-of-range cuts, and contiguity asserted on every
+timeline that any test builds. `camera.test.ts` gains the cut-not-pan assertions
+for `buildSwitchPath` (including the non-whole-step boundary) and `groupCenter`.

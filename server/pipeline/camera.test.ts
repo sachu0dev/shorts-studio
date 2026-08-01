@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildCameraPath, primaryTrack, PRESETS } from "./camera.js";
+import { buildCameraPath, buildSwitchPath, groupCenter, primaryTrack, PRESETS } from "./camera.js";
 import type { FaceTrack } from "./signals.js";
 
 const CROP = 0.3164; // a 9:16 window on a 16:9 source
@@ -85,4 +85,59 @@ test("primaryTrack picks the most-present face, ignoring empty tracks", () => {
   assert.equal(primaryTrack([a, b])!.id, 2);
   assert.equal(primaryTrack([{ id: 9, firstSeen: 0, lastSeen: 0, samples: [] }]), null);
   assert.equal(primaryTrack([]), null);
+});
+
+// ── phase 9: camera-switch + group-crop ───────────────────────────────────────
+
+const SEG = (t0: number, t1: number, target?: number) =>
+  ({ t0, t1, mode: "camera-switch" as const, ...(target != null ? { target } : {}) });
+
+test("switching between two people is a cut, not a pan", () => {
+  const a = track(10, () => 0.25, 1);
+  const b = track(10, () => 0.75, 2);
+  const p = buildSwitchPath([SEG(0, 5, 1), SEG(5, 10, 2)], [a, b], CROP, PRESETS.calm);
+
+  // two keyframes share t=5: the old position and the new one. The renderer's
+  // interpolator resolves a zero span to a jump, so nothing pans between them.
+  const at5 = p.filter((k) => Math.abs(k.t - 5) < 1e-9);
+  assert.equal(at5.length, 2, `expected a duplicated keyframe at the switch, got ${at5.length}`);
+  assert.ok(Math.abs(at5[0].cx - 0.25) < 0.02, `held at ${at5[0].cx}`);
+  assert.ok(Math.abs(at5[1].cx - 0.75) < 0.02, `jumped to ${at5[1].cx}`);
+  // and nothing before the switch drifted toward the second speaker
+  assert.ok(p.filter((k) => k.t < 5).every((k) => k.cx < 0.4));
+});
+
+test("a segment whose target has no track still yields a renderable path", () => {
+  const p = buildSwitchPath([SEG(0, 5, 99), SEG(5, 10)], [], CROP, PRESETS.calm);
+  assert.ok(p.length > 0);
+  assert.ok(p.every((k) => k.cx === 0.5), "expected a centred fallback");
+});
+
+test("the switch path covers every segment and stays inside the frame", () => {
+  const a = track(12, () => 0.05, 1); // hard against the left edge
+  const b = track(12, () => 0.95, 2);
+  const p = buildSwitchPath([SEG(0, 4, 1), SEG(4, 8, 2), SEG(8, 12, 1)], [a, b], CROP, PRESETS.dynamic);
+  const half = CROP / 2;
+  assert.ok(p[0].t === 0 && p[p.length - 1].t >= 11.9);
+  for (const k of p) assert.ok(k.cx >= half - 1e-9 && k.cx <= 1 - half + 1e-9, `cx ${k.cx}`);
+});
+
+test("group-crop is one still keyframe centred between the faces", () => {
+  const p = groupCenter([track(10, () => 0.3, 1), track(10, () => 0.6, 2)], CROP);
+  assert.equal(p.length, 1);
+  assert.ok(Math.abs(p[0].cx - 0.45) < 1e-6);
+});
+
+test("group-crop clamps to the frame and survives having no faces at all", () => {
+  assert.equal(groupCenter([track(10, () => 0.02, 1)], CROP)[0].cx, CROP / 2);
+  assert.deepEqual(groupCenter([], CROP), [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }]);
+});
+
+test("a segment that is not a whole number of steps still cuts rather than pans", () => {
+  const a = track(10, () => 0.25, 1);
+  const b = track(10, () => 0.75, 2);
+  const p = buildSwitchPath([SEG(0, 4.7, 1), SEG(4.7, 10, 2)], [a, b], CROP, PRESETS.calm);
+  const at = p.filter((k) => Math.abs(k.t - 4.7) < 1e-9);
+  assert.equal(at.length, 2, `expected a hold and a jump at 4.7, got ${at.length}`);
+  assert.ok(Math.abs(at[0].cx - 0.25) < 0.02 && Math.abs(at[1].cx - 0.75) < 0.02);
 });

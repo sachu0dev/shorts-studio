@@ -281,7 +281,7 @@ async function runPipeline(job: Job) {
     const analyzeStage: Stage<void, AnalysisArtifact> = {
       name: `analyze:${clipId}`,
       output: `analysis/${clipId}.json`,
-      schemaVersion: 2, // 2: + classification, + signals.wordCount
+      schemaVersion: 3, // 3: cross-cut track re-identification (phase 9)
       async run() {
         await runPythonStage("analyze_clip", jobDir, log, [
           "--clip-id", clipId,
@@ -386,7 +386,7 @@ async function runPipeline(job: Job) {
     const composeStage: Stage<void, Composition> = {
       name: `compose:${clipId}`,
       output: `composition/${clipId}.json`,
-      schemaVersion: 2, // 2: + layoutTimeline[].targetSource, + speakers (phase 8)
+      schemaVersion: 3, // 3: camera-switch + group-crop timelines (phase 9)
       async run() {
         return buildComposition(
           clipId, plan.end - plan.start, analyses.get(clipId) ?? null, PRESET, log, asds.get(clipId) ?? null
@@ -396,6 +396,9 @@ async function runPipeline(job: Job) {
     const c = await runStage(composeStage, ctx, undefined);
     compositions.set(clipId, c);
     log(`${clipId}: ${c.mode} (${c.preset}) — ${c.routedReason}`);
+    if (c.mode === "camera-switch") {
+      log(`${clipId}: ${c.heldSegments} segment(s), ${c.suppressedSwitches} switch(es) suppressed by min-hold`);
+    }
   }
 
   // 8. render clips + thumbnails
@@ -440,6 +443,8 @@ async function runPipeline(job: Job) {
         fallbackReason: c.fallbackReason,
         preset: c.preset,
         cameraKeyframes: c.cameraPath.length,
+        heldSegments: c.heldSegments,
+        suppressedSwitches: c.suppressedSwitches,
         encoder: out.encoder,
         frames: out.frames,
       },

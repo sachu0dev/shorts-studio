@@ -1,4 +1,5 @@
 import type { FaceTrack } from "./signals.js";
+import type { LayoutSegment } from "./router.js";
 
 export interface CameraKeyframe {
   t: number;
@@ -18,6 +19,12 @@ export interface SmoothingPreset {
   snap: number;
   /** How long to hold the last position after a track drops, before recentring. */
   hold: number;
+  /**
+   * Minimum time on one speaker before `camera-switch` may cut away — phase 9's
+   * most important number. It lives on the preset because "how twitchy is the
+   * edit" is exactly what a creator means by calm vs dynamic.
+   */
+  minHold: number;
 }
 
 export type PresetName = "calm" | "dynamic";
@@ -40,8 +47,8 @@ export type PresetName = "calm" | "dynamic";
  * would have caught. Two knobs meaning "don't move" is one knob and a bug.
  */
 export const PRESETS: Record<PresetName, SmoothingPreset> = {
-  calm: { step: 0.25, deadzone: 0.06, smooth: 0.18, snap: 0.12, hold: 3.0 },
-  dynamic: { step: 0.25, deadzone: 0.03, smooth: 0.45, snap: 0.1, hold: 1.2 },
+  calm: { step: 0.25, deadzone: 0.06, smooth: 0.18, snap: 0.12, hold: 3.0, minHold: 2.5 },
+  dynamic: { step: 0.25, deadzone: 0.03, smooth: 0.45, snap: 0.1, hold: 1.2, minHold: 1.5 },
 };
 
 /** A track is considered dropped when its samples gap by more than this. */
@@ -140,4 +147,66 @@ export function buildCameraPath(
     out.push({ t: r4(t), cx: r4(clamp(cur)), cy: 0.5, zoom: 1 });
   }
   return out;
+}
+
+/** The same track with its samples re-based to `t0`, dropping anything outside. */
+function sliceTrack(track: FaceTrack, t0: number, t1: number): FaceTrack | null {
+  const samples = track.samples
+    .filter((s) => s.t >= t0 - 1e-9 && s.t <= t1 + 1e-9)
+    .map((s) => ({ ...s, t: r4(s.t - t0) }));
+  return samples.length ? { ...track, firstSeen: 0, lastSeen: r4(t1 - t0), samples } : null;
+}
+
+/**
+ * `camera-switch`: follow one face per segment, and **cut** between segments.
+ *
+ * Panning between two people two metres apart reads as a rendering bug, not a
+ * style. The cut is expressed as two keyframes sharing a timestamp — the old
+ * position and the new one — which the renderer's interpolator resolves to a
+ * jump because the span between them is zero. That keeps one interpolator in
+ * `render.py` rather than a second "is this a cut" code path.
+ *
+ * Scene cuts are not passed down to the per-segment paths: a segment already
+ * begins at every cut, so a snap inside one is impossible by construction.
+ */
+export function buildSwitchPath(
+  segments: LayoutSegment[],
+  tracks: FaceTrack[],
+  cropWidth: number,
+  preset: SmoothingPreset
+): CameraKeyframe[] {
+  const byId = new Map(tracks.map((t) => [t.id, t]));
+  const out: CameraKeyframe[] = [];
+
+  for (const seg of segments) {
+    const full = seg.target != null ? byId.get(seg.target) ?? null : null;
+    const local = buildCameraPath(
+      full && sliceTrack(full, seg.t0, seg.t1),
+      [], seg.t1 - seg.t0, cropWidth, preset
+    );
+    // Hold the previous position right up to the boundary, then jump. Only
+    // needed when the previous segment's last keyframe fell short of it, which
+    // happens whenever a segment length is not a whole number of steps.
+    const prev = out[out.length - 1];
+    if (prev && prev.t < seg.t0 - 1e-9) out.push({ ...prev, t: r4(seg.t0) });
+    for (const k of local) out.push({ ...k, t: r4(seg.t0 + k.t) });
+  }
+  return out.length ? out : [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
+}
+
+/**
+ * `group-crop`: one window wide enough for everyone, held perfectly still.
+ *
+ * The router only reaches this mode when `facesFitOneCrop` is true — every
+ * active face box inside one 9:16 window with ≥5% margin — so there is nothing
+ * to follow and nothing to switch between. Centring on the group rather than on
+ * the frame is the entire difference from `static-center`, and switching when a
+ * single crop would work is a gimmick the system has to be able to decide against.
+ */
+export function groupCenter(tracks: FaceTrack[], cropWidth: number): CameraKeyframe[] {
+  const xs = tracks.flatMap((t) => t.samples.map((s) => s.cx));
+  if (!xs.length) return [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
+  const half = Math.min(cropWidth, 1) / 2;
+  const mid = (Math.min(...xs) + Math.max(...xs)) / 2;
+  return [{ t: 0, cx: r4(Math.min(1 - half, Math.max(half, mid))), cy: 0.5, zoom: 1 }];
 }

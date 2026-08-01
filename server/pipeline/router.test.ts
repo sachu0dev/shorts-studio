@@ -164,3 +164,58 @@ test("a segment where nobody speaks still frames someone", () => {
   assert.equal(c.layoutTimeline[0].target, 7);
   assert.equal(c.layoutTimeline[0].targetSource, "presence");
 });
+
+// ── phase 9: camera-switch + group-crop are built ─────────────────────────────
+
+const twoTracks = [
+  { id: 4, firstSeen: 0, lastSeen: 10, samples: [
+    { t: 0, cx: 0.3, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 },
+    { t: 10, cx: 0.3, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 }] },
+  { id: 7, firstSeen: 0, lastSeen: 10, samples: [
+    { t: 0, cx: 0.8, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 },
+    { t: 10, cx: 0.8, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 }] },
+];
+
+/** Turn-taking multi-speaker: 4 talks for 5s, then 7 does. */
+function turnTaking(): AsdArtifact {
+  return {
+    schemaVersion: 1, clipId: "clip1", sampleStep: 0.25, scores: {},
+    activeTrack: Array.from({ length: 40 }, (_, k) => (k * 0.25 < 5 ? 4 : 7)),
+    speakers: {}, asdSpeakerCount: 2,
+  };
+}
+
+const multi = (over: Partial<Signals> = {}) => analysis({
+  faceTracks: twoTracks,
+  signals: sig({ medianConcurrentFaces: 2, distinctFaceTracks: 2, overlapRatio: 0.05, ...over }),
+  classification: { type: "multi-speaker", confidence: 0.9, reason: "test" },
+});
+
+test("turn-taking multi-speaker renders camera-switch, not a fallback", () => {
+  const c = buildComposition("clip1", 10, multi(), "calm", () => {}, turnTaking());
+  assert.equal(c.mode, "camera-switch");
+  assert.equal(c.fallbackReason, undefined);
+  assert.deepEqual(c.layoutTimeline.map((s) => [s.t0, s.target]), [[0, 4], [5, 7]]);
+  assert.equal(c.heldSegments, 2);
+});
+
+test("camera-switch without ASD falls back and names the reason", () => {
+  const c = buildComposition("clip1", 10, multi(), "calm", () => {});
+  assert.equal(c.mode, "fullscreen-follow");
+  assert.match(c.fallbackReason!, /active-speaker detection/);
+});
+
+test("faces that fit one crop get group-crop and never switch", () => {
+  const c = buildComposition("clip1", 10, multi({ facesFitOneCrop: true }), "calm", () => {}, turnTaking());
+  assert.equal(c.mode, "group-crop");
+  assert.equal(c.cameraPath.length, 1, "group-crop moved the camera");
+  // centred between the two faces (0.3 and 0.8), not on the frame centre
+  assert.ok(Math.abs(c.cameraPath[0].cx - 0.55) < 1e-6);
+  assert.equal(c.suppressedSwitches, 0);
+});
+
+test("crosstalk still falls back — split-screen is phase 10", () => {
+  const c = buildComposition("clip1", 10, multi({ overlapRatio: 0.4 }), "calm", () => {}, turnTaking());
+  assert.equal(c.mode, "camera-switch");
+  assert.match(c.fallbackReason!, /split-screen is not implemented/);
+});

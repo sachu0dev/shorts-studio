@@ -481,6 +481,14 @@ def _self_test() -> None:
     assert camera_cx(path, -1) == 0.30 and camera_cx(path, 99) == 0.40
     assert camera_cx([], 5) == 0.5
 
+    # phase 9: a camera-switch cut is two keyframes sharing a timestamp. The old
+    # position must hold right up to it and the next frame must already be at the
+    # new one — anything in between is a pan between two people, which reads as a
+    # rendering bug rather than an edit.
+    cut = [{"t": 0.0, "cx": 0.30}, {"t": 5.0, "cx": 0.30}, {"t": 5.0, "cx": 0.70}, {"t": 5.25, "cx": 0.70}]
+    assert camera_cx(cut, 4.9) == 0.30
+    assert abs(camera_cx(cut, 5.0 + 1 / FPS) - 0.70) < 1e-9
+
     print("[render] self-test ok")
 
 

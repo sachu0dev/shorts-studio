@@ -97,6 +97,9 @@ export interface EditSummary {
   fallbackReason?: string;
   preset: string;
   cameraKeyframes: number;
+  /** Held segments and the switches min-hold rejected — phase 9's tuning dials. */
+  heldSegments?: number;
+  suppressedSwitches?: number;
   encoder?: string;
   frames?: number;
 }

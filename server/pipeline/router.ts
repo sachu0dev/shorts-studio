@@ -1,7 +1,11 @@
 import type { Signals, FaceTrack, AnalysisArtifact } from "./signals.js";
 import type { CompositionType } from "./classify.js";
-import { buildCameraPath, primaryTrack, PRESETS, type CameraKeyframe, type PresetName } from "./camera.js";
+import {
+  buildCameraPath, buildSwitchPath, groupCenter, primaryTrack, PRESETS,
+  type CameraKeyframe, type PresetName,
+} from "./camera.js";
 import { activeTrackIn, type AsdArtifact, type SpeakerBinding } from "./binding.js";
+import { buildLayoutTimeline } from "./timeline.js";
 
 export type LayoutMode =
   | "static-center"
@@ -34,7 +38,12 @@ export const ROUTE_THRESHOLDS = {
 };
 
 /** What `render.py` can actually draw today. Everything else falls back. */
-export const IMPLEMENTED_MODES: LayoutMode[] = ["static-center", "fullscreen-follow"];
+export const IMPLEMENTED_MODES: LayoutMode[] = [
+  "static-center", "fullscreen-follow", "group-crop", "camera-switch",
+];
+
+/** Modes that cannot be drawn without knowing who is speaking. */
+const NEEDS_ASD: LayoutMode[] = ["camera-switch"];
 
 /**
  * Which layouts are *possible* for this clip, best first — measured facts only,
@@ -134,6 +143,10 @@ export interface Composition {
   cropWidth: number;
   layoutTimeline: LayoutSegment[];
   cameraPath: CameraKeyframe[];
+  /** Segments actually emitted. */
+  heldSegments: number;
+  /** Speaker changes that min-hold rejected — see `timeline.ts`. */
+  suppressedSwitches: number;
   /** Diarized speaker → face track, from phase 8. Absent when ASD did not run. */
   speakers?: Record<string, SpeakerBinding>;
 }
@@ -165,45 +178,73 @@ export function buildComposition(
     ? route(analysis.signals, type, confidence)
     : { modes: ["static-center"], reason: "no analysis for this clip — static centre" };
 
-  const track: FaceTrack | null = primaryTrack(analysis?.faceTracks ?? []);
-  let mode = routed.modes.find((m) => IMPLEMENTED_MODES.includes(m));
+  const tracks = analysis?.faceTracks ?? [];
+  const track: FaceTrack | null = primaryTrack(tracks);
+  // An ASD artifact with no stabilised track says nothing about who is talking,
+  // so it must not unlock a mode that is only about who is talking.
+  const canSwitch = !!asd?.activeTrack?.length;
+  let mode = routed.modes.find(
+    (m) => IMPLEMENTED_MODES.includes(m) && (canSwitch || !NEEDS_ASD.includes(m))
+  );
   let fallbackReason: string | undefined;
-  if (!mode) {
-    // Never crash on an unbuilt mode, and never silently pretend it rendered.
-    mode = track ? "fullscreen-follow" : "static-center";
-    fallbackReason = `${routed.modes[0]} is not implemented yet — rendering ${mode}`;
+  if (mode !== routed.modes[0]) {
+    // Never crash on an unbuilt mode, and never silently pretend it rendered —
+    // including when a *later* allowed mode was drawn instead of the best one.
+    const first = routed.modes[0];
+    mode ??= track ? "fullscreen-follow" : "static-center";
+    fallbackReason =
+      `${first} ${IMPLEMENTED_MODES.includes(first)
+        ? "needs active-speaker detection, which did not run for this clip"
+        : "is not implemented yet"} — rendering ${mode}`;
     log(`${clipId}: ⚠️ ${fallbackReason}`);
   }
 
   const cropWidth = cropWidthFor(analysis?.sourceWidth ?? 0, analysis?.sourceHeight ?? 0);
   const cuts = analysis?.signals.sceneCuts ?? [];
-  const cameraPath =
-    mode === "fullscreen-follow"
-      ? buildCameraPath(track, cuts, duration, cropWidth, preset)
-      : [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
 
   // Segment boundaries are the scene cuts: a segment that starts at one is a
   // jump, and saying so in the artifact is what makes "did it pan across a cut"
   // answerable without watching the video.
-  const bounds = [0, ...cuts.filter((c) => c > 0 && c < duration), duration];
-  const layoutTimeline: LayoutSegment[] = [];
-  for (let i = 0; i < bounds.length - 1; i++) {
-    // Who to frame. Phase 7 shipped this as "the most-present face" with nothing
-    // checking that face was the one talking; ASD makes it measured. Presence is
-    // still the fallback — a segment where nobody speaks has to frame someone.
-    const speaking = asd ? activeTrackIn(asd.activeTrack, asd.sampleStep, bounds[i], bounds[i + 1]) : null;
-    const target = speaking ?? track?.id;
-    layoutTimeline.push({
-      t0: bounds[i],
-      t1: bounds[i + 1],
-      mode,
-      ...(target != null ? { target, targetSource: speaking != null ? "asd" as const : "presence" as const } : {}),
-      ...(i > 0 ? { snapped: true } : {}),
-    });
+  let layoutTimeline: LayoutSegment[];
+  let cameraPath: CameraKeyframe[];
+  let heldSegments = 1;
+  let suppressedSwitches = 0;
+
+  if (mode === "camera-switch" && canSwitch) {
+    const tl = buildLayoutTimeline(
+      asd.activeTrack, asd.sampleStep, cuts, duration, mode, track?.id ?? null, preset.minHold
+    );
+    ({ heldSegments, suppressedSwitches } = tl);
+    layoutTimeline = tl.segments;
+    cameraPath = buildSwitchPath(layoutTimeline, tracks, cropWidth, preset);
+  } else {
+    const bounds = [0, ...cuts.filter((c) => c > 0 && c < duration), duration];
+    layoutTimeline = [];
+    for (let i = 0; i < bounds.length - 1; i++) {
+      // Who to frame. Phase 7 shipped this as "the most-present face" with nothing
+      // checking that face was the one talking; ASD makes it measured. Presence is
+      // still the fallback — a segment where nobody speaks has to frame someone.
+      const speaking = asd ? activeTrackIn(asd.activeTrack, asd.sampleStep, bounds[i], bounds[i + 1]) : null;
+      const target = speaking ?? track?.id;
+      layoutTimeline.push({
+        t0: bounds[i],
+        t1: bounds[i + 1],
+        mode,
+        ...(target != null ? { target, targetSource: speaking != null ? "asd" as const : "presence" as const } : {}),
+        ...(i > 0 ? { snapped: true } : {}),
+      });
+    }
+    heldSegments = layoutTimeline.length;
+    cameraPath =
+      mode === "fullscreen-follow" ? buildCameraPath(track, cuts, duration, cropWidth, preset)
+      : mode === "group-crop" ? groupCenter(tracks, cropWidth)
+      : [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
   }
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
+    heldSegments,
+    suppressedSwitches,
     clipId,
     compositionType: type,
     allowedModes: routed.modes,
