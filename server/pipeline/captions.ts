@@ -1,4 +1,5 @@
 import type { CaptionAnimation, CaptionPalette } from "../jobs.js";
+import type { TranscriptWord } from "./transcribe.js";
 
 export interface EmphasisWord {
   word: string;
@@ -24,24 +25,53 @@ export function parseEmphasis(text: string): EmphasisWord[] {
   return tokens;
 }
 
-/**
- * Split a transcript-timed caption group into per-word events, linearly
- * interpolating each word's sub-timestamp across the group's window.
- *
- * ponytail: no real per-word alignment exists from platform subtitles —
- * this is an even-split approximation. Upgrade path: forced alignment
- * (e.g. whisper word timestamps) if visual quality demands tighter sync.
- */
-export function splitWordsWithTiming(group: { start: number; end: number; text: string }): TimedWord[] {
-  const words = parseEmphasis(group.text);
-  if (words.length === 0) return [];
-  const slice = (group.end - group.start) / words.length;
-  return words.map((w, i) => ({
-    ...w,
-    start: group.start + i * slice,
-    end: group.start + (i + 1) * slice,
-  }));
+/** Compare words ignoring case and surrounding punctuation. */
+function norm(word: string): string {
+  return word.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
 }
+
+/**
+ * Real word timings from the transcript, clipped to the plan's window and made
+ * clip-relative. The LLM no longer supplies timings — only which words to
+ * emphasize — so its **punch** marks are matched onto the aligned words.
+ *
+ * This replaces the old even-split interpolation, which gave every word in a
+ * caption group the same duration and was the visible caption desync.
+ */
+export function wordsForClip(
+  words: TranscriptWord[],
+  plan: { start: number; end: number; captions: { text: string }[] }
+): TimedWord[] {
+  const punches = new Set<string>();
+  for (const group of plan.captions ?? []) {
+    for (const w of parseEmphasis(group.text)) {
+      if (w.punch) punches.add(norm(w.word));
+    }
+  }
+
+  const dur = plan.end - plan.start;
+  const out: TimedWord[] = [];
+  for (const w of words) {
+    if (w.end <= plan.start || w.start >= plan.end) continue;
+    const start = Math.max(0, w.start - plan.start);
+    const end = Math.min(dur, w.end - plan.start);
+    if (end <= start) continue;
+    out.push({ word: w.w, punch: punches.has(norm(w.w)), start, end });
+  }
+
+  // Real speech leaves short silences between words. Ending each caption on the
+  // word's true end makes the text blink out for a frame or two between words,
+  // so hold it until the next word starts. Only the START drives sync, so this
+  // costs no accuracy — and gaps longer than a beat stay as real pauses.
+  for (let i = 0; i < out.length - 1; i++) {
+    const gap = out[i + 1].start - out[i].end;
+    if (gap > 0 && gap <= HOLD_THROUGH_GAP) out[i].end = out[i + 1].start;
+  }
+  return out;
+}
+
+/** Silences shorter than this are held through rather than shown as a blank. */
+const HOLD_THROUGH_GAP = 0.5;
 
 /** ASS colors are &HAABBGGRR (alpha, blue, green, red — note the reversed order). */
 export const PALETTES: Record<CaptionPalette, { normal: string; punch: string; outline: string; back: string }> = {

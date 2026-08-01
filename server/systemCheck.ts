@@ -54,13 +54,145 @@ async function checkYtDlp(): Promise<CheckResult> {
   return checkBinary("yt-dlp", "yt-dlp", ["--version"]);
 }
 
-async function checkWhisper(): Promise<CheckResult> {
-  const result = await checkBinary("Whisper (optional)", "whisper", ["--help"]);
-  // Whisper is optional — downgrade errors to warnings
-  if (result.status === "error") {
-    return { ...result, status: "warn", detail: result.detail + " (optional — only needed if video has no subtitles)" };
+/** WhisperX is the only transcript source since phase 2 — a missing import is fatal. */
+async function checkWhisperX(): Promise<CheckResult> {
+  const name = "WhisperX";
+  try {
+    const { stdout } = await exec(WORKER_PYTHON, ["-c", 'import whisperx;print("WHISPERX", whisperx.__version__ if hasattr(whisperx,"__version__") else "ok")']);
+    const ver = stdout.split("\n").find((l) => l.startsWith("WHISPERX")) || "ok";
+    return { name, status: "ok", detail: ver.replace("WHISPERX", "whisperx").trim() };
+  } catch (e: any) {
+    return {
+      name,
+      status: "error",
+      detail: `not importable in the worker venv — run: uv pip install --python ${WORKER_PYTHON} whisperx (${String(e?.message || e).slice(0, 80)})`,
+    };
   }
-  return result;
+}
+
+// ─── pure parsers (exported for tests — no shelling out in tests) ─────────────
+
+/**
+ * Wheels for torch/CTranslate2/pyannote exist for 3.10–3.12 only. System python
+ * on this box is 3.14, where installing silently source-builds a CPU-only torch.
+ */
+export function isSupportedPythonVersion(versionLine: string): boolean {
+  const m = /Python (\d+)\.(\d+)/.exec(versionLine);
+  if (!m) return false;
+  return Number(m[1]) === 3 && Number(m[2]) >= 10 && Number(m[2]) <= 12;
+}
+
+export function parseTorchProbe(stdout: string): { version: string; cuda: boolean; device: string } | null {
+  const line = stdout.split("\n").find((l) => l.startsWith("TORCH "));
+  if (!line) return null;
+  const [, version, avail, ...rest] = line.trim().split(" ");
+  return { version, cuda: avail === "True", device: rest.join(" ") || "-" };
+}
+
+/** Fedora's ffmpeg-free ships `--disable-decoder=h264` — only the do-nothing
+ *  libopenh264 stub remains, so most YouTube sources fail to decode. */
+export function hasNativeH264Decoder(decodersOutput: string): boolean {
+  return decodersOutput.split("\n").some((l) => /^\s*V[\w.]*\s+h264\s/.test(l));
+}
+
+export function parseVramMiB(stdout: string): number | null {
+  const m = /(\d+)/.exec(stdout.trim());
+  return m ? Number(m[1]) : null;
+}
+
+export function rollup(results: CheckResult[]): CheckStatus {
+  if (results.some((r) => r.status === "error")) return "error";
+  if (results.some((r) => r.status === "warn")) return "warn";
+  return "ok";
+}
+
+// ─── worker / GPU checks ──────────────────────────────────────────────────────
+
+const WORKER_PYTHON = process.env.WORKER_PYTHON || "./worker/.venv/bin/python";
+
+const TORCH_PROBE =
+  'import torch;print("TORCH",torch.__version__,torch.cuda.is_available(),' +
+  'torch.cuda.get_device_name(0) if torch.cuda.is_available() else "-")';
+
+async function checkWorkerPython(): Promise<CheckResult> {
+  const name = "Worker Python (3.12)";
+  try {
+    const ver = await runVersion(WORKER_PYTHON, ["--version"]);
+    if (!isSupportedPythonVersion(ver)) {
+      return { name, status: "error", detail: `${ver} — needs 3.10–3.12. Run: uv venv --python 3.12 worker/.venv` };
+    }
+    return { name, status: "ok", detail: `${WORKER_PYTHON} — ${ver}` };
+  } catch {
+    return { name, status: "error", detail: `${WORKER_PYTHON} not found. Run: uv venv --python 3.12 worker/.venv` };
+  }
+}
+
+async function checkCudaTorch(): Promise<CheckResult> {
+  const name = "CUDA torch";
+  try {
+    const { stdout } = await exec(WORKER_PYTHON, ["-c", TORCH_PROBE]);
+    const probe = parseTorchProbe(stdout);
+    if (!probe) return { name, status: "error", detail: "torch probe produced no output" };
+    if (!probe.cuda) {
+      return { name, status: "error", detail: `torch ${probe.version} is CPU-only — reinstall from the CUDA index URL` };
+    }
+    return { name, status: "ok", detail: `torch ${probe.version} — ${probe.device}` };
+  } catch (e: any) {
+    return { name, status: "error", detail: `torch not importable in worker venv: ${String(e?.message || e).slice(0, 120)}` };
+  }
+}
+
+async function checkH264Decoder(): Promise<CheckResult> {
+  const name = "H.264 decoder";
+  try {
+    const { stdout } = await exec("ffmpeg", ["-hide_banner", "-decoders"], { maxBuffer: 1024 * 1024 * 8 });
+    if (!hasNativeH264Decoder(stdout)) {
+      return {
+        name,
+        status: "error",
+        detail: "No native h264 decoder — most YouTube sources will fail. Fedora's ffmpeg-free strips it; install a full build into ~/.local/bin",
+      };
+    }
+    return { name, status: "ok", detail: "native h264 decoder present" };
+  } catch (e: any) {
+    return { name, status: "error", detail: `could not list decoders: ${String(e?.message || e).slice(0, 120)}` };
+  }
+}
+
+async function checkNvenc(): Promise<CheckResult> {
+  const name = "NVENC (GPU encode)";
+  try {
+    const { stdout } = await exec("ffmpeg", ["-hide_banner", "-encoders"], { maxBuffer: 1024 * 1024 * 8 });
+    if (!stdout.includes("h264_nvenc")) {
+      return { name, status: "warn", detail: "h264_nvenc unavailable — CPU encoding works but is much slower" };
+    }
+    return { name, status: "ok", detail: "h264_nvenc available" };
+  } catch (e: any) {
+    return { name, status: "warn", detail: `could not list encoders: ${String(e?.message || e).slice(0, 120)}` };
+  }
+}
+
+async function checkVram(): Promise<CheckResult> {
+  const name = "GPU VRAM";
+  try {
+    const { stdout } = await exec("nvidia-smi", ["--query-gpu=memory.total", "--format=csv,noheader,nounits"]);
+    const mib = parseVramMiB(stdout);
+    if (mib === null) return { name, status: "warn", detail: "could not parse nvidia-smi output" };
+    if (mib < 6000) return { name, status: "warn", detail: `${mib} MiB — below the 6 GB the pipeline is tuned for` };
+    return { name, status: "ok", detail: `${mib} MiB total` };
+  } catch {
+    return { name, status: "warn", detail: "nvidia-smi not available — GPU stages will fall back to CPU" };
+  }
+}
+
+async function checkHfToken(): Promise<CheckResult> {
+  const name = "Hugging Face token";
+  const token = process.env.HF_TOKEN;
+  if (!token) {
+    // Transcription still works without it; only speaker labels are lost.
+    return { name, status: "warn", detail: "HF_TOKEN not set — WhisperX will transcribe but produce no speaker labels" };
+  }
+  return { name, status: "ok", detail: "HF_TOKEN set" };
 }
 
 async function checkAnthropicKey(): Promise<CheckResult> {
@@ -137,16 +269,18 @@ export async function runSystemCheck(): Promise<SystemCheckReport> {
   const results = await Promise.all([
     checkFfmpeg(),
     checkFfprobe(),
+    checkH264Decoder(),
+    checkNvenc(),
     checkYtDlp(),
-    checkWhisper(),
+    checkWorkerPython(),
+    checkCudaTorch(),
+    checkVram(),
+    checkHfToken(),
+    checkWhisperX(),
     checkAnthropicKey(),
     checkOpenAiKey(),
     checkGeminiKey(),
   ]);
 
-  const overall: CheckStatus =
-    results.some((r) => r.status === "error") ? "error" :
-    results.some((r) => r.status === "warn")  ? "warn"  : "ok";
-
-  return { overall, checkedAt: new Date().toISOString(), results };
+  return { overall: rollup(results), checkedAt: new Date().toISOString(), results };
 }

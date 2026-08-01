@@ -1,5 +1,12 @@
 node_modules/
+web/node_modules/
+web/dist/
 storage/
+storage-p2/
+worker/.venv/
+__pycache__/
+*.pyc
+deno.lock
 fonts/*
 !fonts/Anton.ttf
 .env
@@ -7,3 +14,4 @@ fonts/*
 dist/
 .superpowers/
 *.zip
+worker/models/

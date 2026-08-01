@@ -1,11 +1,12 @@
 import path from "node:path";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { run, ensureDir } from "./download.js";
 import type { ClipPlan } from "../jobs.js";
-import { splitWordsWithTiming, buildWordOverrideTags, buildStyleLine } from "./captions.js";
-import { buildLayoutFilter, buildMemeOverlayFilter } from "./layouts.js";
+import { buildWordOverrideTags, buildStyleLine, type TimedWord } from "./captions.js";
+import { buildMemeOverlayFilter } from "./layouts.js";
 import { resolveFont } from "./fonts.js";
 import { fetchMemeAsset } from "./memes.js";
+import { runPythonStage } from "./python.js";
 
 function assTime(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -15,12 +16,29 @@ function assTime(sec: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
+/**
+ * Make AI-supplied text safe inside a single-quoted ffmpeg drawtext argument.
+ *
+ * A backslash or apostrophe would terminate the quoted string and corrupt the
+ * whole filtergraph, so both are dropped rather than escaped — thumbnail text is
+ * decorative and losing a character beats losing the render. Use with
+ * `expansion=none`, which is what keeps `%` literal.
+ */
+export function escapeDrawtext(text: string): string {
+  return text
+    .replace(/[\\']/g, "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/:/g, " ")
+    .toUpperCase()
+    .trim();
+}
+
 function esc(t: string) {
   return t.replace(/\\/g, "\\\\").replace(/\{/g, "(").replace(/\}/g, ")").replace(/\n/g, " ");
 }
 
 /** Build an .ass subtitle file for one clip (word-level captions + 2s opening hook). */
-export function buildAss(plan: ClipPlan, outPath: string) {
+export function buildAss(plan: ClipPlan, outPath: string, words: TimedWord[] = []) {
   const dur = plan.end - plan.start;
   const events: string[] = [];
   const fontsize = plan.captionPalette === "news-serious" ? 58 : 72;
@@ -30,16 +48,12 @@ export function buildAss(plan: ClipPlan, outPath: string) {
     `Dialogue: 1,${assTime(0)},${assTime(Math.min(2.2, dur))},Hook,,0,0,0,,{\\fad(120,150)\\t(0,180,\\fscx110\\fscy110)\\t(180,320,\\fscx100\\fscy100)}${esc(plan.hook)}`
   );
 
-  for (const group of plan.captions) {
-    const start = Math.max(0, Math.min(group.start, dur));
-    const end = Math.max(start + 0.2, Math.min(group.end, dur));
-    const words = splitWordsWithTiming({ start, end, text: group.text });
-    for (const w of words) {
-      const tags = buildWordOverrideTags(w, plan.captionAnimation, plan.captionPalette);
-      events.push(
-        `Dialogue: 0,${assTime(w.start)},${assTime(w.end)},Cap,,0,0,0,,${tags}${esc(w.word)}`
-      );
-    }
+  // Timings come from WhisperX forced alignment — one Dialogue per aligned word.
+  for (const w of words) {
+    const start = Math.max(0, Math.min(w.start, dur));
+    const end = Math.max(start + 0.05, Math.min(w.end, dur));
+    const tags = buildWordOverrideTags(w, plan.captionAnimation, plan.captionPalette);
+    events.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Cap,,0,0,0,,${tags}${esc(w.word)}`);
   }
 
   const capStyle = buildStyleLine(plan.captionPalette, plan.captionFont, fontsize);
@@ -65,79 +79,82 @@ ${events.join("\n")}
 
 /**
  * Cut the clip, convert to 9:16 (center-crop), burn captions.
- * Center-crop keeps faces in frame for typical talking-head content.
+ *
+ * Node builds the composition request; `worker/stages/render.py` composites the
+ * frames and drives NVENC. Framing is unchanged from the old ffmpeg `-vf` chain
+ * — a fixed centered crop — so a visual diff here is a bug, not a feature.
+ *
+ * Returns the clip path. The stage's real artifact is `render/<clipId>.json`,
+ * written by Python (same pattern as transcribe and scenes).
  */
 export async function renderClip(
   sourceVideo: string,
   plan: ClipPlan,
+  jobDir: string,
   outDir: string,
-  onLine: (l: string) => void
+  onLine: (l: string) => void,
+  words: TimedWord[] = []
 ): Promise<string> {
   ensureDir(outDir);
-  const assPath = path.join(outDir, `clip${plan.index}.ass`);
-  buildAss(plan, assPath);
-  const outPath = path.join(outDir, `clip${plan.index}.mp4`);
-  const assFilter = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-
+  const clipId = `clip${plan.index}`;
+  const assPath = path.join(outDir, `${clipId}.ass`);
+  buildAss(plan, assPath, words);
+  const outPath = path.join(outDir, `${clipId}.mp4`);
   const fontPath = await resolveFont(plan.captionFont);
-  const fontsDir = path.dirname(fontPath).replace(/\\/g, "/").replace(/:/g, "\\:");
 
-  const layoutFilter = buildLayoutFilter(plan.layoutTemplate, plan);
-  const baseChain = [
-    "crop=ih*9/16:ih",
-    "scale=1080:1920",
-    ...(layoutFilter ? [layoutFilter] : []),
-    `ass='${assFilter}':fontsdir='${fontsDir}'`,
-  ].join(",");
-
-  // Resolve meme assets (best-effort — missing/failed ones are skipped).
-  const resolvedMemes: { meme: (typeof plan.memes)[number]; assetPath: string }[] = [];
+  // Memes stay an ffmpeg concern: they are extra inputs on the encoder command
+  // that already exists, and Giphy assets are animated files OpenCV would have
+  // to decode itself. Resolution is best-effort — CLAUDE.md rule 5.
+  const memeInputs: string[] = [];
+  const memeParts: string[] = [];
+  let finalLabel = "[base]";
   for (const meme of plan.memes) {
     const assetPath = await fetchMemeAsset(meme.query);
-    if (assetPath) resolvedMemes.push({ meme, assetPath });
-    else onLine(`⚠️ Meme fetch skipped for "${meme.query}" — no result or missing GIPHY_API_KEY`);
+    if (!assetPath) {
+      onLine(`⚠️ Meme fetch skipped for "${meme.query}" — no result or missing GIPHY_API_KEY`);
+      continue;
+    }
+    // input 0 is the raw frame pipe and input 1 is the source (audio), so meme
+    // inputs start at 2 — render.py appends them in exactly this order.
+    const label = `[out${memeInputs.length}]`;
+    memeParts.push(buildMemeOverlayFilter(meme, `[${memeInputs.length + 2}:v]`, finalLabel, label));
+    memeInputs.push(assetPath);
+    finalLabel = label;
   }
 
-  if (resolvedMemes.length === 0) {
-    // No memes to composite: simple single -vf chain, same as before.
-    await run(
-      "ffmpeg",
-      [
-        "-y", "-ss", String(plan.start), "-to", String(plan.end), "-i", sourceVideo,
-        "-vf", baseChain,
-        "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
-        outPath,
-      ],
-      onLine
-    );
-    return outPath;
-  }
+  // The compose stage already wrote the edit decision (route, camera path,
+  // layout timeline). This adds the render inputs to the same file, so there is
+  // one artifact per clip explaining one edit rather than two half-explanations.
+  const compDir = path.join(jobDir, "composition");
+  const compPath = path.join(compDir, `${clipId}.json`);
+  const decision = existsSync(compPath) ? JSON.parse(readFileSync(compPath, "utf8")) : {};
+  const dur = plan.end - plan.start;
+  const composition = {
+    schemaVersion: 1,
+    clipId,
+    compositionType: plan.compositionType ?? null,
+    mode: "static-center",
+    cameraPath: [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1.0 }],
+    ...decision,
+    // Phase 12 makes `effects` multi-segment; today one template spans the clip.
+    effects: [{ t0: 0, t1: dur, template: plan.layoutTemplate }],
+    // Paths inside the job dir are relative so phase 23 can move the store.
+    // Fonts and meme assets are machine-local caches outside it — absolute.
+    source: path.relative(jobDir, sourceVideo),
+    start: plan.start,
+    end: plan.end,
+    out: path.relative(jobDir, outPath),
+    ass: path.relative(jobDir, assPath),
+    fontsDir: path.dirname(fontPath),
+    contentMode: plan.contentMode,
+    memeInputs,
+    memeFilter: memeParts.join(";"),
+    finalLabel,
+  };
+  mkdirSync(compDir, { recursive: true });
+  writeFileSync(compPath, JSON.stringify(composition, null, 2));
 
-  // With memes: build a filter_complex chaining the base video through the
-  // layout/caption filter, then compositing each meme overlay in sequence.
-  const inputs = ["-ss", String(plan.start), "-to", String(plan.end), "-i", sourceVideo];
-  const complexParts: string[] = [`[0:v]${baseChain}[base]`];
-  let prevLabel = "[base]";
-  resolvedMemes.forEach(({ meme }, i) => {
-    inputs.push("-i", resolvedMemes[i].assetPath);
-    const outLabel = `[out${i}]`;
-    complexParts.push(buildMemeOverlayFilter(meme, `[${i + 1}:v]`, prevLabel, outLabel));
-    prevLabel = outLabel;
-  });
-
-  await run(
-    "ffmpeg",
-    [
-      "-y", ...inputs,
-      "-filter_complex", complexParts.join(";"),
-      "-map", prevLabel, "-map", "0:a",
-      "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-      "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
-      outPath,
-    ],
-    onLine
-  );
+  await runPythonStage("render", jobDir, onLine, ["--clip-id", clipId]);
   return outPath;
 }
 
@@ -149,13 +166,14 @@ export async function renderThumbnail(
   onLine: (l: string) => void
 ): Promise<string> {
   const outPath = path.join(outDir, `clip${plan.index}_thumb.jpg`);
-  const text = plan.thumbnailText.replace(/'/g, "").replace(/:/g, " ").toUpperCase();
 
   const vf = [
     "crop=ih*9/16:ih",
     "scale=1080:1920",
     "eq=contrast=1.08:saturation=1.25",
-    `drawtext=text='${text}':fontcolor=white:fontsize=110:borderw=8:bordercolor=black:x=(w-text_w)/2:y=h-360:font='Arial Black'`,
+    // expansion=none makes "%" literal — without it drawtext reads %{...} as a
+    // format sequence and a title like "80% Traders Lose" fails the whole render.
+    `drawtext=text='${escapeDrawtext(plan.thumbnailText)}':expansion=none:fontcolor=white:fontsize=110:borderw=8:bordercolor=black:x=(w-text_w)/2:y=h-360:font='Arial Black'`,
   ].join(",");
 
   await run(

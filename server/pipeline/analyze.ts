@@ -100,7 +100,7 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
 const VALID_CONTENT_MODES: ContentMode[] = ["funny", "gaming", "political"];
 const VALID_ANIMATIONS: CaptionAnimation[] = ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"];
 const VALID_PALETTES: CaptionPalette[] = ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"];
-const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "speed-ramp", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout"];
+export const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout"];
 const VALID_MEME_DISPLAYS: MemeDisplayMode[] = ["corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split"];
 
 /**
@@ -165,23 +165,68 @@ export function buildPlanPrompt(args: {
   transcript: string;
   trendBrief: string;
   descriptionSection: string;
+  /** 0 = let the model decide how many genuinely good clips the video supports. */
   clipCount: number;
   videoDuration: number;
   controversialMode: boolean;
+  /** Detected transcript language, e.g. "en" or "hi". */
+  language?: string;
+  /** True when Devanagari was transliterated to Latin (i.e. genuine Hinglish). */
+  romanized?: boolean;
+  /** Scene-cut timestamps, so the model can pick windows that already align. */
+  sceneCuts?: number[];
 }): string {
   const monetizationInstruction = args.controversialMode
     ? `Edgy, opinionated, or politically controversial moments are explicitly permitted — the creator has opted in to controversial content.`
     : `Actively avoid clips centered on hate speech, graphic violence, sexual content, harassment, or dangerous misinformation — prefer the next-best safe moment from the transcript instead.`;
 
-  return `You are a viral shorts editor for the Indian market.
+  // clipCount 0 = auto. Padding to a fixed number is what makes tools ship
+  // filler clips, so in auto mode quality is stated as the binding constraint.
+  const auto = args.clipCount <= 0;
+  const maxAuto = Math.max(1, Math.min(10, Math.floor(args.videoDuration / 90)));
+  const countInstruction = auto
+    ? `choose as many clips as this video GENUINELY supports — between 1 and ${maxAuto}.
+  Judge each candidate on its own merit: a clip earns its place only if it has a real hook,
+  a payoff, and works with no outside context. If the video only supports one strong clip,
+  return exactly one. Do NOT pad to reach a number — a weak clip costs the channel more
+  than a missing one. State in each clip's "reason" why it clears that bar.`
+    : `choose exactly ${args.clipCount} clips`;
 
-TREND BRIEF (current Indian shorts trends):
+  // Source language drives the output register. Forcing Hinglish onto a fully
+  // English video reads as inauthentic, and plenty of Indian creators publish
+  // entirely in English.
+  const lang = (args.language || "en").toLowerCase();
+  const hinglish = args.romanized === true || lang.startsWith("hi");
+  const languageRule = hinglish
+    ? `This video is HINGLISH (Hindi/English code-switching). The transcript is romanized into
+  Latin script. Write titles, hooks and hashtags in that same romanized Hinglish register,
+  mixing Hindi and English the way the speaker actually does. Never output Devanagari.`
+    : `This video is in ${lang.toUpperCase()} and contains no code-switching. Write titles, hooks
+  and hashtags in that same language. Do NOT sprinkle in Hindi or Hinglish words — forced
+  Hinglish on an English clip reads as inauthentic and hurts reach.`;
+
+  // Steering selection toward real cuts is cheaper than correcting it after,
+  // and it improves which moments get picked rather than only where they end.
+  const cuts = args.sceneCuts ?? [];
+  const cutsSection = cuts.length
+    ? `SCENE CUTS (seconds — prefer clip boundaries at or very near these):
+${cuts.slice(0, 400).map((c) => c.toFixed(1)).join(", ")}
+
+`
+    : "";
+
+  return `You are a viral shorts editor. Primary audience: India.
+
+LANGUAGE (binding — match the source, do not translate):
+${languageRule}
+
+${cutsSection}TREND BRIEF (current Indian shorts trends):
 ${args.trendBrief}
 ${args.descriptionSection}
 FULL VIDEO TRANSCRIPT with [start-end] second timestamps (video duration ${args.videoDuration.toFixed(0)}s):
 ${args.transcript}
 
-Task: choose exactly ${args.clipCount} clips for YouTube Shorts. Rules:
+Task: ${countInstruction} for YouTube Shorts. Rules:
 - Each clip 20-58 seconds long, must start/end at natural sentence boundaries from the transcript.
 - Prioritize moments matching the trend brief AND the creator instructions: strong hooks, emotion, payoff, controversy, "wait for it" moments.
 - Clips must not overlap.
@@ -190,16 +235,16 @@ Task: choose exactly ${args.clipCount} clips for YouTube Shorts. Rules:
 - captionAnimation: pick per clip from "karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split" — whichever suits the clip's energy.
 - captionPalette: pick per clip from "gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean" — match to contentMode (e.g. gaming -> gaming-neon, political -> news-serious).
 - captionFont: pick a bold, high-impact Google Fonts family name appropriate to the palette (e.g. "Anton", "Bebas Neue", "Luckiest Guy", "Archivo Black", "Poppins", "Montserrat").
-- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "speed-ramp", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout".
+- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout".
 - memes: an array (can be empty) of {start, end, query, display} for moments where a meme/reaction GIF would land well. display is one of "corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split". query is a short search term (e.g. "shocked cat", "mind blown").
 - monetizationFlag: {risky: boolean, reasons: string[]} — your honest self-assessment of demonetization risk for this clip's content (hate speech, graphic violence, sexual content, harassment, dangerous misinformation, excessive profanity). ${monetizationInstruction}
 - thumbnailTimestamp: an absolute second in the source video with a strong facial expression or key visual for that clip.
-- hashtags: 5-8, mix of English + Hindi/Hinglish, India-relevant.
+- hashtags: 5-8, in the LANGUAGE register defined above; India-relevant only where it fits naturally.
 - title: <=90 chars, curiosity-driven, no clickbait lies.
 - hook: <=8 words shown on screen for the first 2 seconds.
 - script: a 2-3 sentence description of the clip's narrative arc (used for description text).
 
-Respond ONLY with a JSON array of ${args.clipCount} objects with keys:
+Respond ONLY with a JSON array of ${auto ? "1 to " + maxAuto : args.clipCount} objects with keys:
 index, title, hook, start, end, reason, script, hashtags, thumbnailText, thumbnailTimestamp, captions, contentMode, captionAnimation, captionPalette, captionFont, layoutTemplate, memes, monetizationFlag.
 No markdown fences, no commentary.`;
 }
@@ -215,7 +260,10 @@ export async function planClips(
   videoDuration: number,
   provider: AiProvider,
   userDescription: string,
-  controversialMode: boolean
+  controversialMode: boolean,
+  language = "en",
+  romanized = false,
+  sceneCuts: number[] = []
 ): Promise<ClipPlan[]> {
   const compact = transcript
     .map((s) => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text}`)
@@ -233,6 +281,9 @@ export async function planClips(
     clipCount,
     videoDuration,
     controversialMode,
+    language,
+    romanized,
+    sceneCuts,
   });
 
   const text = (await complete(provider, prompt, 8000))
@@ -240,5 +291,6 @@ export async function planClips(
     .trim();
 
   const rawPlans = JSON.parse(text) as (Partial<ClipPlan> & { index: number })[];
+  if (!Array.isArray(rawPlans)) throw new Error("planner did not return a JSON array");
   return rawPlans.map((p) => sanitizePlan(p, videoDuration));
 }

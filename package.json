@@ -4,8 +4,10 @@
   "description": "Fully automated YouTube -> Shorts pipeline: trend research, clip selection, auto-editing, captions, thumbnails.",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch server/index.ts",
+    "dev": "concurrently -n server,web -c auto \"tsx watch server/index.ts\" \"npm run dev --prefix web\"",
+    "dev:server": "tsx watch server/index.ts",
     "start": "tsx server/index.ts",
+    "build:web": "npm run build --prefix web",
     "test": "node --import tsx --test 'server/**/*.test.ts'"
   },
   "dependencies": {
@@ -20,6 +22,7 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.5.0",
+    "concurrently": "^10.0.4",
     "tsx": "^4.19.0",
     "typescript": "^5.6.2"
   }

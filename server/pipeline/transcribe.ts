@@ -1,78 +1,92 @@
-import { readFileSync, existsSync } from "node:fs";
-import path from "node:path";
-import { run } from "./download.js";
+import { runPythonStage } from "./python.js";
 
 export interface Segment {
   start: number;
   end: number;
   text: string;
+  /** Original script (e.g. Devanagari) when romanized. The LLM reads it better. */
+  textNative?: string;
+  speaker?: string | null;
 }
 
-function ts(t: string): number {
-  // 00:01:02.500 or 01:02.500
-  const parts = t.trim().split(":").map(Number.parseFloat);
-  return parts.reduce((acc, v) => acc * 60 + v, 0);
+export interface TranscriptWord {
+  w: string;
+  wNative: string;
+  start: number;
+  end: number;
+  speaker?: string | null;
+  confidence?: number | null;
 }
 
-/** Parse a WebVTT file into merged, de-duplicated segments. */
-export function parseVtt(vttPath: string): Segment[] {
-  const raw = readFileSync(vttPath, "utf8");
-  const lines = raw.split(/\r?\n/);
-  const segs: Segment[] = [];
-  let cur: Segment | null = null;
-
-  for (const line of lines) {
-    const m = line.match(
-      /(\d{1,2}:)?\d{2}:\d{2}\.\d{3}\s*-->\s*(\d{1,2}:)?\d{2}:\d{2}\.\d{3}/
-    );
-    if (m) {
-      const [a, b] = line.split("-->");
-      if (cur && cur.text) segs.push(cur);
-      cur = { start: ts(a), end: ts(b.split(" ")[1] ?? b), text: "" };
-    } else if (cur && line.trim() && !line.startsWith("WEBVTT") && !line.startsWith("Kind:") && !line.startsWith("Language:")) {
-      const clean = line
-        .replace(/<[^>]+>/g, "") // strip inline timing tags
-        .trim();
-      if (clean && !cur.text.includes(clean)) {
-        cur.text = (cur.text + " " + clean).trim();
-      }
-    }
-  }
-  if (cur && cur.text) segs.push(cur);
-
-  // Auto-subs repeat lines across cues; merge consecutive duplicates
-  const merged: Segment[] = [];
-  for (const s of segs) {
-    const last = merged[merged.length - 1];
-    if (last && (s.text === last.text || last.text.endsWith(s.text))) {
-      last.end = s.end;
-    } else if (last && s.text.startsWith(last.text)) {
-      last.text = s.text;
-      last.end = s.end;
-    } else {
-      merged.push({ ...s });
-    }
-  }
-  return merged.filter((s) => s.text.length > 0);
+export interface TranscriptArtifact {
+  schemaVersion: number;
+  language: string;
+  romanized: boolean;
+  modelTier: string;
+  words: TranscriptWord[];
+  speakers: string[];
+  unalignedWords: number;
+  lowConfidenceRatio: number;
+  warnings: string[];
+  peakVramMb?: number;
+  ms?: number;
 }
+
+/** Runs WhisperX. There is no subtitle path — sentence-level VTT timings are
+ *  what produced the caption desync this replaces. */
+export async function transcribeWithWhisperX(jobDir: string, onLine: (l: string) => void): Promise<void> {
+  await runPythonStage("transcribe", jobDir, onLine);
+}
+
+const MAX_SEGMENT_SECONDS = 8;
+const MAX_SEGMENT_WORDS = 14;
+/** A pause this long reads as a sentence boundary. */
+const PAUSE_BREAK = 0.7;
 
 /**
- * If no subtitles came with the video, fall back to whisper.cpp / openai-whisper
- * if installed locally ("whisper" on PATH). Produces a .vtt next to the video.
+ * Groups words into readable segments for the planning LLM. Breaks on speaker
+ * change, long pause, sentence punctuation, or length — so a segment never
+ * spans two speakers, which would confuse clip selection.
  */
-export async function whisperFallback(
-  videoPath: string,
-  onLine: (l: string) => void
-): Promise<Segment[]> {
-  const dir = path.dirname(videoPath);
-  const wav = path.join(dir, "audio.wav");
-  await run("ffmpeg", ["-y", "-i", videoPath, "-ar", "16000", "-ac", "1", wav], onLine);
-  await run(
-    "whisper",
-    [wav, "--model", "small", "--output_format", "vtt", "--output_dir", dir],
-    onLine
-  );
-  const vtt = path.join(dir, "audio.vtt");
-  if (!existsSync(vtt)) throw new Error("Whisper ran but produced no VTT");
-  return parseVtt(vtt);
+export function wordsToSegments(words: TranscriptWord[]): Segment[] {
+  const segments: Segment[] = [];
+  let cur: (Segment & { count: number }) | null = null;
+
+  const flush = () => {
+    if (cur && cur.text.trim()) {
+      const { count, ...seg } = cur;
+      seg.text = seg.text.trim();
+      seg.textNative = (seg.textNative || "").trim() || undefined;
+      segments.push(seg);
+    }
+    cur = null;
+  };
+
+  for (const word of words) {
+    const speakerChanged = cur !== null && (cur.speaker ?? null) !== (word.speaker ?? null);
+    const pause = cur !== null && word.start - cur.end > PAUSE_BREAK;
+    const tooLong = cur !== null && (word.end - cur.start > MAX_SEGMENT_SECONDS || cur.count >= MAX_SEGMENT_WORDS);
+    if (cur && (speakerChanged || pause || tooLong)) flush();
+
+    if (!cur) {
+      cur = {
+        start: word.start,
+        end: word.end,
+        text: word.w,
+        textNative: word.wNative,
+        speaker: word.speaker ?? null,
+        count: 1,
+      };
+    } else {
+      cur.text += ` ${word.w}`;
+      cur.textNative += ` ${word.wNative}`;
+      cur.end = word.end;
+      cur.count++;
+    }
+
+    // end the segment on sentence-final punctuation
+    if (cur && /[.!?]$/.test(word.w)) flush();
+  }
+  flush();
+  return segments;
 }

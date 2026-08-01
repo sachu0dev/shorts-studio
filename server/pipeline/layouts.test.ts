@@ -1,49 +1,31 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildLayoutFilter, buildMemeOverlayFilter } from "./layouts.js";
-import type { ClipPlan, LayoutTemplate, MemeOverlay, MemeDisplayMode } from "../jobs.js";
+import { readFileSync } from "node:fs";
+import { buildMemeOverlayFilter } from "./layouts.js";
+import { VALID_LAYOUTS } from "./analyze.js";
+import type { LayoutTemplate, MemeOverlay, MemeDisplayMode } from "../jobs.js";
 
-function samplePlan(overrides: Partial<ClipPlan> = {}): ClipPlan {
-  return {
-    index: 0, title: "t", hook: "h", start: 0, end: 10, reason: "r", script: "s",
-    hashtags: [], thumbnailText: "t", thumbnailTimestamp: 1,
-    captions: [], contentMode: "funny", captionAnimation: "karaoke-reveal",
-    captionPalette: "pop-white-red", captionFont: "Anton", layoutTemplate: "fullscreen",
-    memes: [], monetizationFlag: { risky: false, reasons: [] },
-    ...overrides,
-  };
-}
+/**
+ * The layout list lives in TypeScript and the renderers live in Python, so
+ * nothing but this test stops the two drifting. A template the LLM may pick
+ * with no renderer behind it does not fail — it silently renders fullscreen,
+ * which is exactly the kind of wrong number that sits unnoticed for a month.
+ */
+test("every layout template has a renderer in render.py, and vice versa", () => {
+  const py = readFileSync(new URL("../../worker/stages/render.py", import.meta.url), "utf8");
+  const table = py.slice(py.indexOf("\nEFFECTS = {"));
+  const keys = [...table.slice(0, table.indexOf("}")).matchAll(/"([a-z-]+)":/g)].map((m) => m[1]);
 
-const EXPECTED_FILTER_SUBSTRING: Record<LayoutTemplate, string> = {
-  "fullscreen": "",
-  "blurred-fill": "boxblur",
-  "meme-corner": "",
-  "zoom-punch": "zoompan",
-  "shake-on-beat": "crop=",
-  "speed-ramp": "setpts",
-  "vignette-pulse": "vignette",
-  "glitch-cut": "rgbashift",
-  "color-grade-pop": "eq=",
-  "split-screen-duo": "vstack",
-  "letterbox-cinematic": "pad=",
-  "freeze-frame-callout": "tpad",
-};
-
-test("every layout template produces a non-throwing filter string", () => {
-  for (const template of Object.keys(EXPECTED_FILTER_SUBSTRING) as LayoutTemplate[]) {
-    const filter = buildLayoutFilter(template, samplePlan({ layoutTemplate: template }));
-    assert.equal(typeof filter, "string");
-    const expectedSubstr = EXPECTED_FILTER_SUBSTRING[template];
-    if (expectedSubstr) {
-      assert.ok(filter.includes(expectedSubstr), `${template} filter missing "${expectedSubstr}": ${filter}`);
-    }
+  assert.ok(keys.length > 0, "could not parse the EFFECTS table out of render.py");
+  for (const template of VALID_LAYOUTS) {
+    assert.ok(keys.includes(template), `layout "${template}" has no renderer in render.py`);
   }
-});
-
-test("color-grade-pop varies by contentMode", () => {
-  const gaming = buildLayoutFilter("color-grade-pop", samplePlan({ layoutTemplate: "color-grade-pop", contentMode: "gaming" }));
-  const political = buildLayoutFilter("color-grade-pop", samplePlan({ layoutTemplate: "color-grade-pop", contentMode: "political" }));
-  assert.notEqual(gaming, political);
+  for (const key of keys) {
+    assert.ok(
+      VALID_LAYOUTS.includes(key as LayoutTemplate),
+      `render.py renders "${key}", which is not a layout the planner can pick`
+    );
+  }
 });
 
 function sampleMeme(display: MemeDisplayMode): MemeOverlay {

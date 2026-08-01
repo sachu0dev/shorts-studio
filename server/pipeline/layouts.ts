@@ -1,50 +1,9 @@
-import type { ClipPlan, LayoutTemplate, MemeOverlay } from "../jobs.js";
+import type { MemeOverlay } from "../jobs.js";
 
-/**
- * Pure ffmpeg filter-chain builders per layout template. Each returns a
- * comma-joinable filter fragment (no crop/scale/ass — the caller composes
- * those around this). Empty string means "no extra filter beyond the base
- * crop/scale" (fullscreen, meme-corner reserve no extra filter here — the
- * meme-corner reservation happens via the meme overlay step in layouts.ts's
- * overlay builders, not here).
- */
-export function buildLayoutFilter(template: LayoutTemplate, plan: ClipPlan): string {
-  switch (template) {
-    case "fullscreen":
-      return "";
-    case "meme-corner":
-      return "";
-    case "blurred-fill":
-      return "split=2[bg][fg];[bg]scale=1080:1920,boxblur=20:5[bgblur];[fg]scale=1080:960[fgsharp];[bgblur][fgsharp]overlay=0:0";
-    case "zoom-punch":
-      return "zoompan=z='if(lte(mod(time,2),0.3),1.08,1.0)':d=1:s=1080x1920";
-    case "shake-on-beat":
-      return "crop=iw-20:ih-20:10+5*sin(t*30):10+5*cos(t*30)";
-    case "speed-ramp":
-      // ponytail: video-only setpts desyncs audio during the ramp window (known limitation).
-      // Upgrade path: apply a matching atempo filter to the audio stream keyed to the same
-      // mod(T,10)<1 windows so audio speed tracks the video ramp.
-      return "setpts=if(lt(mod(T\\,10)\\,1)\\,2.0*PTS\\,PTS)";
-    case "vignette-pulse":
-      return "vignette=PI/4+0.1*sin(t*3)";
-    case "glitch-cut":
-      return "rgbashift=rh=4:bh=-4:rv=2:bv=-2";
-    case "color-grade-pop":
-      return plan.contentMode === "gaming"
-        ? "eq=saturation=1.5:contrast=1.15"
-        : plan.contentMode === "political"
-          ? "curves=preset=cross_process,eq=saturation=0.9"
-          : "eq=saturation=1.3:contrast=1.1"; // funny
-    case "split-screen-duo":
-      return "split=2[top][bottom];[top]crop=iw:ih/2:0:0,scale=1080:960[t2];[bottom]crop=iw:ih/2:0:ih/2,scale=1080:960[b2];[t2][b2]vstack";
-    case "letterbox-cinematic":
-      return "pad=1080:1920:0:120:black";
-    case "freeze-frame-callout":
-      return "tpad=stop_mode=clone:stop_duration=0.6";
-    default:
-      return "";
-  }
-}
+// `buildLayoutFilter` lived here until phase 6. The 12 templates are now
+// per-frame functions in `worker/stages/render.py` (EFFECTS), because dynamic
+// camera paths and split-screen cannot be expressed as one ffmpeg filter graph.
+// Meme overlays stayed in ffmpeg — see the note in `edit.ts`.
 
 /**
  * Build one filter_complex fragment compositing a meme input over the base

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildAss, renderClip } from "./edit.js";
+import { buildAss, renderClip, renderThumbnail, escapeDrawtext } from "./edit.js";
+import type { TimedWord } from "./captions.js";
 import type { ClipPlan } from "../jobs.js";
 
 function samplePlan(overrides: Partial<ClipPlan> = {}): ClipPlan {
@@ -30,14 +31,43 @@ function samplePlan(overrides: Partial<ClipPlan> = {}): ClipPlan {
   };
 }
 
+const words: TimedWord[] = [
+  { word: "this", punch: false, start: 0, end: 0.9 },
+  { word: "is", punch: false, start: 0.9, end: 1.02 },
+  { word: "so", punch: true, start: 1.02, end: 1.5 },
+  { word: "cool", punch: false, start: 1.5, end: 2.0 },
+];
+
 test("buildAss writes one Dialogue event per word plus the hook", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ass-test-"));
   const outPath = path.join(dir, "test.ass");
-  buildAss(samplePlan(), outPath);
+  buildAss(samplePlan(), outPath, words);
   const content = readFileSync(outPath, "utf8");
   const dialogueLines = content.split("\n").filter((l) => l.startsWith("Dialogue:"));
-  // 4 words ("this","is","so","cool") + 1 hook line = 5
+  // 4 words + 1 hook line = 5
   assert.equal(dialogueLines.length, 5);
+});
+
+test("buildAss emits each word at its real transcript timing, not an even split", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ass-test-"));
+  const outPath = path.join(dir, "test.ass");
+  buildAss(samplePlan(), outPath, words);
+  const caps = readFileSync(outPath, "utf8").split("\n")
+    .filter((l) => l.startsWith("Dialogue: 0,"))
+    .map((l) => l.split(",").slice(1, 3));
+
+  // "this" runs 0 -> 0.90 while "is" runs 0.90 -> 1.02; an even split would
+  // have given both the same duration.
+  assert.deepEqual(caps[0], ["0:00:00.00", "0:00:00.90"]);
+  assert.deepEqual(caps[1], ["0:00:00.90", "0:00:01.02"]);
+});
+
+test("buildAss with no aligned words still writes the hook rather than throwing", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ass-test-"));
+  const outPath = path.join(dir, "test.ass");
+  buildAss(samplePlan(), outPath, []);
+  const lines = readFileSync(outPath, "utf8").split("\n").filter((l) => l.startsWith("Dialogue:"));
+  assert.equal(lines.length, 1);
 });
 
 test("buildAss embeds the chosen font and palette in the style line", () => {
@@ -51,7 +81,7 @@ test("buildAss embeds the chosen font and palette in the style line", () => {
 test("buildAss escapes braces and backslashes in caption text", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ass-test-"));
   const outPath = path.join(dir, "test.ass");
-  buildAss(samplePlan({ captions: [{ start: 0, end: 1, text: "weird{text}\\here" }] }), outPath);
+  buildAss(samplePlan(), outPath, [{ word: "weird{text}\\here", punch: false, start: 0, end: 1 }]);
   const content = readFileSync(outPath, "utf8");
   assert.equal(content.includes("{text}"), false);
 });
@@ -70,13 +100,13 @@ test("renderClip produces a valid mp4 for every layout template using a syntheti
 
   const templates: ClipPlan["layoutTemplate"][] = [
     "fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat",
-    "speed-ramp", "vignette-pulse", "glitch-cut", "color-grade-pop",
+    "vignette-pulse", "glitch-cut", "color-grade-pop",
     "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout",
   ];
 
-  for (const layoutTemplate of templates) {
-    const plan = samplePlan({ start: 0, end: 3, layoutTemplate, captions: [{ start: 0, end: 2, text: "test **word**" }] });
-    const outPath = await renderClip(sourcePath, plan, dir, () => {});
+  for (const [i, layoutTemplate] of templates.entries()) {
+    const plan = samplePlan({ index: i, start: 0, end: 3, layoutTemplate, captions: [{ start: 0, end: 2, text: "test **word**" }] });
+    const outPath = await renderClip(sourcePath, plan, dir, dir, () => {});
     assert.ok(existsSync(outPath), `${layoutTemplate} did not produce an output file`);
   }
 });
@@ -132,11 +162,38 @@ test("renderClip composites a meme overlay into a compound layout filter_complex
       captions: [{ start: 0, end: 2, text: "test **word**" }],
       memes: [{ start: 0, end: 1, query: "shocked cat", display: "corner-overlay" }],
     });
-    const outPath = await renderClip(sourcePath, plan, dir, () => {});
+    const outPath = await renderClip(sourcePath, plan, dir, dir, () => {});
     assert.ok(existsSync(outPath), "meme-compositing render did not produce an output file");
   } finally {
     (globalThis as any).fetch = originalFetch;
     if (originalApiKey === undefined) delete process.env.GIPHY_API_KEY;
     else process.env.GIPHY_API_KEY = originalApiKey;
   }
+});
+
+test("escapeDrawtext neutralises text that would break the filtergraph", () => {
+  // the real failure: "80% Traders Lose" made ffmpeg exit 234 mid-run
+  assert.equal(escapeDrawtext("80% Traders Lose"), "80% TRADERS LOSE");
+  assert.equal(escapeDrawtext("When The 0.1% Takes All"), "WHEN THE 0.1% TAKES ALL");
+  // a quote or backslash would close the quoted argument early
+  assert.equal(escapeDrawtext("It's \\ gone"), "ITS  GONE");
+  assert.equal(escapeDrawtext("First Salary: 8.5K"), "FIRST SALARY  8.5K");
+  assert.equal(escapeDrawtext("two\nlines"), "TWO LINES");
+});
+
+test("renderThumbnail survives a percent sign in the title", { timeout: 120_000 }, async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "thumb-pct-"));
+  const sourcePath = path.join(dir, "source.mp4");
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=640x480:rate=30",
+    "-t", "2", "-c:v", "libx264", sourcePath,
+  ]);
+  const out = await renderThumbnail(
+    sourcePath,
+    samplePlan({ thumbnailText: "80% Traders Lose", thumbnailTimestamp: 1 }),
+    dir,
+    () => {}
+  );
+  assert.ok(existsSync(out), "a percent sign must not fail the thumbnail render");
 });

@@ -19,15 +19,16 @@ export function run(cmd: string, args: string[], onLine?: (l: string) => void): 
 
 /**
  * Downloads the video (mp4, <=1080p to keep ffmpeg fast).
- * Subtitles are attempted separately as a best-effort step so that
- * a 429 / rate-limit error never aborts the pipeline.
- * Returns { videoPath, subPath? }.
+ *
+ * Subtitles are deliberately NOT downloaded. WhisperX transcribes every job
+ * (phase 2): platform subtitles carry sentence-level timings only, which is
+ * what produced the caption desync, and their text is frequently worse.
  */
 export async function downloadVideo(
   url: string,
   destDir: string,
   onLine: (l: string) => void
-): Promise<{ videoPath: string; subPath?: string }> {
+): Promise<{ videoPath: string }> {
   mkdirSync(destDir, { recursive: true });
   const outTemplate = path.join(destDir, "source.%(ext)s");
 
@@ -35,7 +36,14 @@ export async function downloadVideo(
   await run(
     "yt-dlp",
     [
-      "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
+      // Prefer H.264 (avc1) explicitly. YouTube often serves AV1 in an mp4
+      // container, which OpenCV cannot decode at all — it reads zero frames and
+      // reports "no scene cuts" rather than failing. NVDEC and the phase-6
+      // OpenCV render path both want h264 too. AV1 remains the last resort so a
+      // video that only exists in AV1 still downloads.
+      "-f",
+      "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][vcodec^=avc1]/" +
+        "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
       "--merge-output-format", "mp4",
       "--no-playlist",
       "--no-write-subs",
@@ -46,44 +54,9 @@ export async function downloadVideo(
     onLine
   );
 
-  // Confirm the video file is present before doing anything else
-  const filesAfterVideo = readdirSync(destDir);
-  const videoFile = filesAfterVideo.find(
-    (f) => f.startsWith("source.") && f.endsWith(".mp4")
-  );
-  if (!videoFile) throw new Error("Download finished but no mp4 found");
-
-  // ── Phase 2: attempt subtitle download as best-effort ───────────────────
-  // Use --skip-download so we only fetch the .vtt files, not re-download video.
-  // --ignore-errors prevents a 429 on subtitles from exiting with code 1.
-  try {
-    await run(
-      "yt-dlp",
-      [
-        "--skip-download",
-        "--write-auto-subs", "--write-subs",
-        "--sub-langs", "en.*,en",
-        "--sub-format", "vtt",
-        "--ignore-errors",
-        "--no-playlist",
-        "-o", outTemplate,
-        url,
-      ],
-      onLine
-    );
-  } catch (subErr: any) {
-    // Best-effort: subtitle failures (429, network, etc.) are non-fatal
-    onLine(`⚠️ Subtitles unavailable (${subErr.message}). Whisper will transcribe instead.`);
-  }
-
-  const files = readdirSync(destDir);
-  const video = files.find((f) => f.startsWith("source.") && f.endsWith(".mp4"));
+  const video = readdirSync(destDir).find((f) => f.startsWith("source.") && f.endsWith(".mp4"));
   if (!video) throw new Error("Download finished but no mp4 found");
-  const sub = files.find((f) => f.endsWith(".vtt"));
-  return {
-    videoPath: path.join(destDir, video),
-    subPath: sub ? path.join(destDir, sub) : undefined,
-  };
+  return { videoPath: path.join(destDir, video) };
 }
 
 export function ensureDir(dir: string) {

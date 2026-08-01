@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseEmphasis, splitWordsWithTiming, buildWordOverrideTags, buildStyleLine, PALETTES } from "./captions.js";
+import { parseEmphasis, wordsForClip, buildWordOverrideTags, buildStyleLine, PALETTES } from "./captions.js";
+import type { TranscriptWord } from "./transcribe.js";
 
 test("parseEmphasis strips ** markers and flags punch words", () => {
   const result = parseEmphasis("this is **so** cool");
@@ -30,20 +31,55 @@ test("parseEmphasis handles multi-word emphasis spans", () => {
   ]);
 });
 
-test("splitWordsWithTiming interpolates evenly across the group window", () => {
-  const words = splitWordsWithTiming({ start: 10, end: 12, text: "four little test words" });
-  assert.equal(words.length, 4);
-  assert.equal(words[0].word, "four");
-  assert.equal(words[0].start, 10);
-  assert.equal(words[3].end, 12);
-  // each word gets an equal 0.5s slice of the 2s window
-  assert.ok(Math.abs(words[1].start - 10.5) < 0.001);
-  assert.ok(Math.abs(words[2].start - 11) < 0.001);
+const W = (w: string, start: number, end: number): TranscriptWord => ({ w, wNative: w, start, end });
+
+test("wordsForClip uses real transcript timings, NOT an even split", () => {
+  // deliberately uneven: "aaaa" is long, the rest are short
+  const words = [W("aaaa", 10.0, 11.4), W("b", 11.4, 11.6), W("c", 11.6, 11.75), W("d", 11.75, 12.0)];
+  const out = wordsForClip(words, { start: 10, end: 12, captions: [] });
+
+  assert.equal(out.length, 4);
+  assert.deepEqual(out.map((w) => w.word), ["aaaa", "b", "c", "d"]);
+  // clip-relative
+  assert.equal(out[0].start, 0);
+  assert.equal(out[3].end, 2);
+  // the old interpolation would have made every word exactly 0.5s
+  const durations = out.map((w) => +(w.end - w.start).toFixed(3));
+  assert.deepEqual(durations, [1.4, 0.2, 0.15, 0.25]);
+  assert.ok(new Set(durations).size > 1, "durations must not be uniform");
 });
 
-test("splitWordsWithTiming carries punch flags through", () => {
-  const words = splitWordsWithTiming({ start: 0, end: 1, text: "no **way** dude" });
-  assert.deepEqual(words.map((w) => w.punch), [false, true, false]);
+test("wordsForClip holds a word through a short silence so captions do not flicker", () => {
+  // 80ms of real silence between the two words
+  const words = [W("hello", 0, 0.32), W("there", 0.40, 0.70)];
+  const out = wordsForClip(words, { start: 0, end: 5, captions: [] });
+  assert.equal(out[0].end, 0.40, "the first word should hold until the second starts");
+  assert.equal(out[0].start, 0, "the start — which is what drives sync — must be untouched");
+});
+
+test("wordsForClip leaves a real pause as a real pause", () => {
+  const words = [W("before", 0, 0.4), W("after", 3.0, 3.4)];
+  const out = wordsForClip(words, { start: 0, end: 5, captions: [] });
+  assert.equal(out[0].end, 0.4, "a 2.6s silence must not be papered over");
+});
+
+test("wordsForClip applies the LLM's punch marks to aligned words", () => {
+  const words = [W("no", 0, 0.4), W("way", 0.4, 1.0), W("dude", 1.0, 1.4)];
+  const out = wordsForClip(words, { start: 0, end: 2, captions: [{ text: "no **way** dude" }] });
+  assert.deepEqual(out.map((w) => w.punch), [false, true, false]);
+});
+
+test("wordsForClip matches punch marks ignoring case and punctuation", () => {
+  const words = [W("Way,", 0, 0.5)];
+  const out = wordsForClip(words, { start: 0, end: 2, captions: [{ text: "**way**" }] });
+  assert.equal(out[0].punch, true);
+});
+
+test("wordsForClip keeps only words inside the clip window and clamps overlaps", () => {
+  const words = [W("before", 0, 5), W("inside", 12, 13), W("straddle", 19.5, 21), W("after", 30, 31)];
+  const out = wordsForClip(words, { start: 10, end: 20, captions: [] });
+  assert.deepEqual(out.map((w) => w.word), ["inside", "straddle"]);
+  assert.equal(out[1].end, 10, "a word crossing the end is clamped to the clip length");
 });
 
 test("PALETTES has all 6 palettes with valid ASS color format", () => {
