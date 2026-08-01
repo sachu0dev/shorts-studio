@@ -188,13 +188,26 @@ export function bindSpeakersToTracks(
   return out;
 }
 
-/** Face tracks that speak for at least `minSpeakingSeconds`. */
-export function asdSpeakerCount(scores: AsdScores, sampleStep: number): number {
+/**
+ * Track ids that speak for at least `minSpeakingSeconds`, most-talkative first.
+ *
+ * This is what phase 10 uses as "bound to a real speaker" instead of
+ * diarization: `pyannote` is gated (see phase 8), so a track earns the label by
+ * measured talking time, not by a diarized identity.
+ */
+export function speakingTracks(scores: AsdScores, sampleStep: number): number[] {
   const T = ASD_THRESHOLDS;
   const need = T.minSpeakingSeconds / sampleStep;
-  return Object.values(scores).filter(
-    (s) => s.filter((v) => v != null && v >= T.speaking).length >= need
-  ).length;
+  return Object.entries(scores)
+    .map(([id, s]) => [Number(id), s.filter((v) => v != null && v >= T.speaking).length] as const)
+    .filter(([, n]) => n >= need)
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id);
+}
+
+/** Face tracks that speak for at least `minSpeakingSeconds`. */
+export function asdSpeakerCount(scores: AsdScores, sampleStep: number): number {
+  return speakingTracks(scores, sampleStep).length;
 }
 
 /** The track speaking for most of [t0, t1), or null when nobody is. */

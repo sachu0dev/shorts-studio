@@ -101,7 +101,7 @@ test("renderClip produces a valid mp4 for every layout template using a syntheti
   const templates: ClipPlan["layoutTemplate"][] = [
     "fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat",
     "vignette-pulse", "glitch-cut", "color-grade-pop",
-    "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout",
+    "letterbox-cinematic", "freeze-frame-callout",
   ];
 
   for (const [i, layoutTemplate] of templates.entries()) {

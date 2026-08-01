@@ -64,11 +64,11 @@ export function primaryTrack(tracks: FaceTrack[]): FaceTrack | null {
 }
 
 /**
- * Horizontal centre of the track at time `t`, or null when the face is not on
+ * `axis` centre of the track at time `t`, or null when the face is not on
  * screen — before it appears, after it leaves, or inside a gap long enough to
  * be a real dropout rather than one missed detection.
  */
-function sampleAt(track: FaceTrack, t: number): number | null {
+function sampleAt(track: FaceTrack, t: number, axis: "cx" | "cy" = "cx"): number | null {
   const s = track.samples;
   if (!s.length || t < s[0].t || t > s[s.length - 1].t) return null;
   for (let i = 1; i < s.length; i++) {
@@ -77,43 +77,35 @@ function sampleAt(track: FaceTrack, t: number): number | null {
     const b = s[i];
     if (b.t - a.t > MAX_SAMPLE_GAP) return null;
     const span = b.t - a.t;
-    return span <= 0 ? b.cx : a.cx + ((t - a.t) / span) * (b.cx - a.cx);
+    return span <= 0 ? b[axis] : a[axis] + ((t - a.t) / span) * (b[axis] - a[axis]);
   }
-  return s[s.length - 1].cx;
+  return s[s.length - 1][axis];
 }
 
 const r4 = (n: number) => Math.round(n * 10000) / 10000;
 
 /**
- * Keyframes for a 9:16 window following one face.
- *
- * `static-center` is the degenerate case of this — a constant path — so the
- * renderer has one code path, not two.
+ * Deadzone/smooth/snap/hold applied to one moving value — the core of
+ * `buildCameraPath`, pulled out so `buildHalfPath` can run it twice (x and y)
+ * for a split-screen half instead of duplicating the smoothing math.
  */
-export function buildCameraPath(
-  track: FaceTrack | null,
+function trackAxis(
+  sampleAt: (t: number) => number | null,
+  seed: number,
   cuts: number[],
   duration: number,
-  cropWidth: number,
+  clamp: (x: number) => number,
   preset: SmoothingPreset
-): CameraKeyframe[] {
-  const half = Math.min(cropWidth, 1) / 2;
-  // The window cannot leave the frame, so cx is bounded before anything else
-  // reads it. A path that says 0.9 on a 0.5625-wide window is not a camera move,
-  // it is a black bar.
-  const clamp = (x: number) => Math.min(1 - half, Math.max(half, x));
-
-  if (!track || !track.samples.length) return [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
-
-  const out: CameraKeyframe[] = [];
-  let cur = clamp(sampleAt(track, 0) ?? track.samples[0].cx);
+): { t: number; v: number }[] {
+  const out: { t: number; v: number }[] = [];
+  let cur = clamp(seed);
   let lastGood = 0;
   // Hysteresis: without it the camera stops the moment the face re-enters the
   // deadzone, leaving it parked a deadzone-width off centre for the whole clip.
   let moving = false;
 
   for (let t = 0; t <= duration + 1e-6; t += preset.step) {
-    const seen = sampleAt(track, t);
+    const seen = sampleAt(t);
     const recentring = seen === null && t - lastGood > preset.hold;
     let target: number;
     if (seen !== null) {
@@ -144,13 +136,67 @@ export function buildCameraPath(
       if (moving) cur = cur + preset.smooth * d;
     }
 
-    out.push({ t: r4(t), cx: r4(clamp(cur)), cy: 0.5, zoom: 1 });
+    out.push({ t: r4(t), v: r4(clamp(cur)) });
   }
   return out;
 }
 
+/**
+ * Keyframes for a 9:16 window following one face.
+ *
+ * `static-center` is the degenerate case of this — a constant path — so the
+ * renderer has one code path, not two.
+ */
+export function buildCameraPath(
+  track: FaceTrack | null,
+  cuts: number[],
+  duration: number,
+  cropWidth: number,
+  preset: SmoothingPreset
+): CameraKeyframe[] {
+  const half = Math.min(cropWidth, 1) / 2;
+  // The window cannot leave the frame, so cx is bounded before anything else
+  // reads it. A path that says 0.9 on a 0.5625-wide window is not a camera move,
+  // it is a black bar.
+  const clamp = (x: number) => Math.min(1 - half, Math.max(half, x));
+
+  if (!track || !track.samples.length) return [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
+
+  const seed = sampleAt(track, 0, "cx") ?? track.samples[0].cx;
+  const xs = trackAxis((t) => sampleAt(track, t, "cx"), seed, cuts, duration, clamp, preset);
+  return xs.map((p) => ({ t: p.t, cx: p.v, cy: 0.5, zoom: 1 }));
+}
+
+/** Fraction of source height a split-screen half occupies — always half. */
+export const SPLIT_HALF_HEIGHT = 0.5;
+
+/**
+ * Keyframes for one split-screen half: the same smoothing as `buildCameraPath`,
+ * run on both axes, because a half-height 9:8 window can drift out of frame
+ * vertically in a way the full-height 9:16 crop never has to worry about.
+ */
+export function buildHalfPath(
+  track: FaceTrack | null,
+  duration: number,
+  cropWidth: number,
+  preset: SmoothingPreset
+): CameraKeyframe[] {
+  const halfX = Math.min(cropWidth, 1) / 2;
+  const halfY = SPLIT_HALF_HEIGHT / 2;
+  const clampX = (x: number) => Math.min(1 - halfX, Math.max(halfX, x));
+  const clampY = (y: number) => Math.min(1 - halfY, Math.max(halfY, y));
+
+  if (!track || !track.samples.length) return [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
+
+  const seedX = sampleAt(track, 0, "cx") ?? track.samples[0].cx;
+  const seedY = sampleAt(track, 0, "cy") ?? track.samples[0].cy;
+  const xs = trackAxis((t) => sampleAt(track, t, "cx"), seedX, [], duration, clampX, preset);
+  const ys = trackAxis((t) => sampleAt(track, t, "cy"), seedY, [], duration, clampY, preset);
+  return xs.map((p, i) => ({ t: p.t, cx: p.v, cy: ys[i].v, zoom: 1 }));
+}
+
 /** The same track with its samples re-based to `t0`, dropping anything outside. */
-function sliceTrack(track: FaceTrack, t0: number, t1: number): FaceTrack | null {
+export function sliceTrack(track: FaceTrack, t0: number, t1: number): FaceTrack | null {
   const samples = track.samples
     .filter((s) => s.t >= t0 - 1e-9 && s.t <= t1 + 1e-9)
     .map((s) => ({ ...s, t: r4(s.t - t0) }));
@@ -192,6 +238,35 @@ export function buildSwitchPath(
     for (const k of local) out.push({ ...k, t: r4(seg.t0 + k.t) });
   }
   return out.length ? out : [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
+}
+
+/**
+ * `split-screen`: two independently-tracked halves, stacked. Only `"split-screen"`
+ * segments contribute keyframes — the gaps where the timeline is doing
+ * `camera-switch` instead are never read by the renderer, so there is nothing
+ * to fill them with.
+ */
+export function buildSplitPath(
+  segments: LayoutSegment[],
+  tracks: FaceTrack[],
+  targets: [number, number],
+  cropWidth: number,
+  preset: SmoothingPreset
+): { top: CameraKeyframe[]; bottom: CameraKeyframe[] } {
+  const byId = new Map(tracks.map((t) => [t.id, t]));
+  const build = (trackId: number): CameraKeyframe[] => {
+    const full = byId.get(trackId) ?? null;
+    const out: CameraKeyframe[] = [];
+    for (const seg of segments) {
+      if (seg.mode !== "split-screen") continue;
+      const local = buildHalfPath(full && sliceTrack(full, seg.t0, seg.t1), seg.t1 - seg.t0, cropWidth, preset);
+      const prev = out[out.length - 1];
+      if (prev && prev.t < seg.t0 - 1e-9) out.push({ ...prev, t: r4(seg.t0) });
+      for (const k of local) out.push({ ...k, t: r4(seg.t0 + k.t) });
+    }
+    return out.length ? out : [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }];
+  };
+  return { top: build(targets[0]), bottom: build(targets[1]) };
 }
 
 /**

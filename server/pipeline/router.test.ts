@@ -93,7 +93,7 @@ function analysis(overrides: Partial<AnalysisArtifact> = {}): AnalysisArtifact {
   };
 }
 
-test("an unimplemented mode falls back and says so, rather than crashing", () => {
+test("a mode needing ASD falls back to presence framing when ASD didn't run, rather than crashing", () => {
   const lines: string[] = [];
   const c = buildComposition("clip1", 10, analysis({
     signals: sig({ ...twoShot, overlapRatio: 0.4 }),
@@ -102,7 +102,7 @@ test("an unimplemented mode falls back and says so, rather than crashing", () =>
 
   assert.deepEqual(c.allowedModes, ["split-screen", "camera-switch"]);
   assert.equal(c.mode, "fullscreen-follow");
-  assert.match(c.fallbackReason!, /split-screen is not implemented/);
+  assert.match(c.fallbackReason!, /active-speaker detection/);
   assert.equal(lines.length, 1);
 });
 
@@ -214,8 +214,51 @@ test("faces that fit one crop get group-crop and never switch", () => {
   assert.equal(c.suppressedSwitches, 0);
 });
 
-test("crosstalk still falls back — split-screen is phase 10", () => {
+test("crosstalk falls back to camera-switch when ASD found no concurrent speaker", () => {
+  // turnTaking()'s scores are empty — nobody clears the ASD speaking-time bar,
+  // so there is nobody to bind either half of a split to.
   const c = buildComposition("clip1", 10, multi({ overlapRatio: 0.4 }), "calm", () => {}, turnTaking());
   assert.equal(c.mode, "camera-switch");
-  assert.match(c.fallbackReason!, /split-screen is not implemented/);
+  assert.match(c.fallbackReason!, /active-speaker detection/);
+});
+
+// ── phase 10: split-screen ────────────────────────────────────────────────────
+
+/** Both tracks 4 and 7 clear the ASD speaking bar throughout — genuine crosstalk. */
+function bothSpeaking(): AsdArtifact {
+  const hi = Array(40).fill(0.9);
+  return {
+    schemaVersion: 1, clipId: "clip1", sampleStep: 0.25,
+    scores: { "4": hi, "7": hi },
+    activeTrack: Array.from({ length: 40 }, (_, k) => (k % 2 ? 7 : 4)),
+    speakers: {}, asdSpeakerCount: 2,
+  };
+}
+
+test("crosstalk with two ASD-confirmed speakers renders split-screen", () => {
+  const c = buildComposition("clip1", 10, multi({ overlapRatio: 0.4 }), "calm", () => {}, bothSpeaking());
+  assert.equal(c.mode, "split-screen");
+  assert.equal(c.fallbackReason, undefined);
+  assert.ok(c.layoutTimeline.some((s) => s.mode === "split-screen" && s.arrangement === "stacked"));
+  assert.ok(c.splitPath);
+});
+
+test("crosstalk with only one ASD-confirmed speaker still falls back to camera-switch", () => {
+  const oneSpeaker: AsdArtifact = {
+    schemaVersion: 1, clipId: "clip1", sampleStep: 0.25,
+    scores: { "4": Array(40).fill(0.9), "7": Array(40).fill(0.1) },
+    activeTrack: Array(40).fill(4), speakers: {}, asdSpeakerCount: 1,
+  };
+  const c = buildComposition("clip1", 10, multi({ overlapRatio: 0.4 }), "calm", () => {}, oneSpeaker);
+  assert.equal(c.mode, "camera-switch");
+  assert.match(c.fallbackReason!, /active-speaker detection/);
+});
+
+test("split-screen targets are ordered by first-seen and stable for the whole clip", () => {
+  // Track 7 first-seen before track 4, so 7 must lead despite the higher id.
+  const lateTrack4 = twoTracks.map((t) => (t.id === 4 ? { ...t, firstSeen: 3 } : t));
+  const a = { ...multi({ overlapRatio: 0.4 }), faceTracks: lateTrack4 };
+  const c = buildComposition("clip1", 10, a, "calm", () => {}, bothSpeaking());
+  const splitSeg = c.layoutTimeline.find((s) => s.mode === "split-screen");
+  assert.deepEqual(splitSeg?.targets, [7, 4]);
 });

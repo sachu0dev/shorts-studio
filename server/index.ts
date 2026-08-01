@@ -386,7 +386,7 @@ async function runPipeline(job: Job) {
     const composeStage: Stage<void, Composition> = {
       name: `compose:${clipId}`,
       output: `composition/${clipId}.json`,
-      schemaVersion: 3, // 3: camera-switch + group-crop timelines (phase 9)
+      schemaVersion: 4, // 4: split-screen timelines (phase 10)
       async run() {
         return buildComposition(
           clipId, plan.end - plan.start, analyses.get(clipId) ?? null, PRESET, log, asds.get(clipId) ?? null
@@ -396,7 +396,7 @@ async function runPipeline(job: Job) {
     const c = await runStage(composeStage, ctx, undefined);
     compositions.set(clipId, c);
     log(`${clipId}: ${c.mode} (${c.preset}) — ${c.routedReason}`);
-    if (c.mode === "camera-switch") {
+    if (c.mode === "camera-switch" || c.mode === "split-screen") {
       log(`${clipId}: ${c.heldSegments} segment(s), ${c.suppressedSwitches} switch(es) suppressed by min-hold`);
     }
   }

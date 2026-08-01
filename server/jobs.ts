@@ -37,7 +37,9 @@ export type LayoutTemplate =
   | "vignette-pulse"
   | "glitch-cut"
   | "color-grade-pop"
-  | "split-screen-duo"
+  // "split-screen-duo" was removed in phase 10: a fixed ffmpeg half-split that
+  // couldn't follow anyone. `"split-screen"` in `LayoutMode` (router.ts) is the
+  // real, router-driven, independently-tracked replacement.
   | "letterbox-cinematic"
   | "freeze-frame-callout";
 

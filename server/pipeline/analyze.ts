@@ -100,7 +100,7 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
 const VALID_CONTENT_MODES: ContentMode[] = ["funny", "gaming", "political"];
 const VALID_ANIMATIONS: CaptionAnimation[] = ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"];
 const VALID_PALETTES: CaptionPalette[] = ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"];
-export const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout"];
+export const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout"];
 const VALID_MEME_DISPLAYS: MemeDisplayMode[] = ["corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split"];
 
 /**
@@ -235,7 +235,7 @@ Task: ${countInstruction} for YouTube Shorts. Rules:
 - captionAnimation: pick per clip from "karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split" — whichever suits the clip's energy.
 - captionPalette: pick per clip from "gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean" — match to contentMode (e.g. gaming -> gaming-neon, political -> news-serious).
 - captionFont: pick a bold, high-impact Google Fonts family name appropriate to the palette (e.g. "Anton", "Bebas Neue", "Luckiest Guy", "Archivo Black", "Poppins", "Montserrat").
-- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "split-screen-duo", "letterbox-cinematic", "freeze-frame-callout".
+- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "zoom-punch", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout".
 - memes: an array (can be empty) of {start, end, query, display} for moments where a meme/reaction GIF would land well. display is one of "corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split". query is a short search term (e.g. "shocked cat", "mind blown").
 - monetizationFlag: {risky: boolean, reasons: string[]} — your honest self-assessment of demonetization risk for this clip's content (hate speech, graphic violence, sexual content, harassment, dangerous misinformation, excessive profanity). ${monetizationInstruction}
 - thumbnailTimestamp: an absolute second in the source video with a strong facial expression or key visual for that clip.

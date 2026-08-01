@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildLayoutTimeline, TIMELINE } from "./timeline.js";
+import { buildLayoutTimeline, buildSplitAwareTimeline, TIMELINE } from "./timeline.js";
 import { PRESETS } from "./camera.js";
+import type { AsdScores } from "./binding.js";
 
 const STEP = 0.25;
 
@@ -114,6 +115,51 @@ test("duplicate and out-of-range cuts do not produce zero-length segments", () =
   const t = tl(active([1, 12]), [-1, 0, 5, 5, 12, 99], 12);
   assertContiguous(t.segments, 12);
   assert.equal(t.segments.length, 2);
+});
+
+// ── phase 10: split-screen ────────────────────────────────────────────────────
+
+/** [value, seconds] runs, concatenated — the score-array analogue of `active()`. */
+function scoreRuns(...runs: [number, number][]): number[] {
+  return runs.flatMap(([v, secs]) => Array(Math.round(secs / STEP)).fill(v));
+}
+
+const SPEAKING = 0.9;
+const QUIET = 0.1;
+const split = (activeTrack: (number | null)[], scores: AsdScores, duration: number, cuts: number[] = []) =>
+  buildSplitAwareTimeline(activeTrack, scores, [1, 2], STEP, cuts, duration, 1);
+
+test("a split segment shorter than min-hold is absorbed", () => {
+  const scores: AsdScores = {
+    1: scoreRuns([SPEAKING, 12]),
+    2: scoreRuns([QUIET, 5], [SPEAKING, 1], [QUIET, 6]),
+  };
+  const t = split(active([1, 12]), scores, 12);
+  assert.equal(t.segments.length, 1);
+  assert.equal(t.segments[0].mode, "camera-switch");
+  assert.equal(t.suppressedSwitches > 0, true);
+});
+
+test("targets ordering is stable across every split segment in the clip", () => {
+  // Two separate crosstalk windows, each long enough to earn a segment,
+  // separated by turn-taking in between.
+  const scores: AsdScores = {
+    1: scoreRuns([SPEAKING, 3], [QUIET, 4], [SPEAKING, 3], [QUIET, 2]),
+    2: scoreRuns([SPEAKING, 3], [QUIET, 4], [SPEAKING, 3], [QUIET, 2]),
+  };
+  const t = split(active([1, 12]), scores, 12);
+  const splits = t.segments.filter((s) => s.mode === "split-screen");
+  assert.ok(splits.length >= 2, `expected at least 2 split segments, got ${splits.length}`);
+  for (const s of splits) assert.deepEqual(s.targets, [1, 2]);
+});
+
+test("a scene cut inside a split segment ends it", () => {
+  const scores: AsdScores = { 1: scoreRuns([SPEAKING, 8]), 2: scoreRuns([SPEAKING, 8]) };
+  const t = split(active([1, 8]), scores, 8, [4]);
+  assert.deepEqual(
+    t.segments.map((s) => [s.t0, s.t1, s.mode, s.snapped ?? false]),
+    [[0, 4, "split-screen", false], [4, 8, "split-screen", true]]
+  );
 });
 
 test("calm cuts less than dynamic on the same turn-taking clip", () => {

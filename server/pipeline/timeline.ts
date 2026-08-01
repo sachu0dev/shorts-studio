@@ -1,4 +1,5 @@
 import type { LayoutMode, LayoutSegment } from "./router.js";
+import { ASD_THRESHOLDS, type AsdScores } from "./binding.js";
 
 export const TIMELINE = {
   /**
@@ -46,12 +47,13 @@ export function buildLayoutTimeline(
   sampleStep: number,
   cuts: number[],
   duration: number,
-  mode: LayoutMode,
+  mode: LayoutMode | ((target: number | null) => LayoutMode),
   fallbackTarget: number | null,
   minHold: number = TIMELINE.minHold
 ): Timeline {
   const cutTimes = [...new Set(cuts.filter((c) => c > 0 && c < duration))].sort((a, b) => a - b);
   const at = (t: number) => activeTrack[Math.floor(t / sampleStep)] ?? null;
+  const modeFor = typeof mode === "function" ? mode : () => mode;
 
   const segments: LayoutSegment[] = [];
   let suppressedSwitches = 0;
@@ -64,7 +66,7 @@ export function buildLayoutTimeline(
   const close = (t1: number, nextSnapped: boolean) => {
     if (t1 - t0 < 1e-9) return;
     segments.push({
-      t0: round(t0), t1: round(t1), mode,
+      t0: round(t0), t1: round(t1), mode: modeFor(target),
       ...(target != null ? { target, targetSource: source } : {}),
       ...(snapped ? { snapped: true } : {}),
     });
@@ -133,3 +135,47 @@ function turnLength(activeTrack: (number | null)[], k: number, id: number, step:
 }
 
 const round = (n: number) => Math.round(n * 1000) / 1000;
+
+/**
+ * A track id no real face track ever has (`analyze_clip.py` ids start at 0),
+ * used to smuggle "both targets are concurrently speaking" through
+ * `buildLayoutTimeline`'s cut/min-hold machinery as if it were a third
+ * "speaker" — which is exactly the behaviour split-screen wants: entering and
+ * leaving split is a switch like any other, and earns the same hold.
+ */
+const SPLIT_SENTINEL = -1;
+
+/**
+ * `buildLayoutTimeline`, but a segment becomes `split-screen` instead of
+ * `camera-switch` whenever both `targets` are concurrently over the ASD
+ * speaking threshold. Reuses the exact cut/min-hold rules rather than
+ * re-implementing them — a one-word interjection must not trigger a split any
+ * more than it triggers a switch.
+ */
+export function buildSplitAwareTimeline(
+  activeTrack: (number | null)[],
+  scores: AsdScores,
+  targets: [number, number],
+  sampleStep: number,
+  cuts: number[],
+  duration: number,
+  fallbackTarget: number | null,
+  minHold: number = TIMELINE.minHold
+): Timeline {
+  const [a, b] = targets;
+  const speaking = (id: number, k: number) => (scores[id]?.[k] ?? -1) >= ASD_THRESHOLDS.speaking;
+  const mapped = activeTrack.map((v, k) => (speaking(a, k) && speaking(b, k) ? SPLIT_SENTINEL : v));
+
+  const tl = buildLayoutTimeline(
+    mapped, sampleStep, cuts, duration,
+    (t) => (t === SPLIT_SENTINEL ? "split-screen" : "camera-switch"),
+    fallbackTarget, minHold
+  );
+
+  const segments = tl.segments.map((s) =>
+    s.target === SPLIT_SENTINEL
+      ? { ...s, target: undefined, targetSource: undefined, targets, arrangement: "stacked" as const }
+      : s
+  );
+  return { ...tl, segments };
+}

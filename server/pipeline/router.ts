@@ -1,11 +1,11 @@
 import type { Signals, FaceTrack, AnalysisArtifact } from "./signals.js";
 import type { CompositionType } from "./classify.js";
 import {
-  buildCameraPath, buildSwitchPath, groupCenter, primaryTrack, PRESETS,
+  buildCameraPath, buildSwitchPath, buildSplitPath, groupCenter, primaryTrack, PRESETS,
   type CameraKeyframe, type PresetName,
 } from "./camera.js";
-import { activeTrackIn, type AsdArtifact, type SpeakerBinding } from "./binding.js";
-import { buildLayoutTimeline } from "./timeline.js";
+import { activeTrackIn, speakingTracks, type AsdArtifact, type SpeakerBinding } from "./binding.js";
+import { buildLayoutTimeline, buildSplitAwareTimeline } from "./timeline.js";
 
 export type LayoutMode =
   | "static-center"
@@ -39,11 +39,11 @@ export const ROUTE_THRESHOLDS = {
 
 /** What `render.py` can actually draw today. Everything else falls back. */
 export const IMPLEMENTED_MODES: LayoutMode[] = [
-  "static-center", "fullscreen-follow", "group-crop", "camera-switch",
+  "static-center", "fullscreen-follow", "group-crop", "camera-switch", "split-screen",
 ];
 
 /** Modes that cannot be drawn without knowing who is speaking. */
-const NEEDS_ASD: LayoutMode[] = ["camera-switch"];
+const NEEDS_ASD: LayoutMode[] = ["camera-switch", "split-screen"];
 
 /**
  * Which layouts are *possible* for this clip, best first — measured facts only,
@@ -127,6 +127,9 @@ export interface LayoutSegment {
   targetSource?: "asd" | "presence";
   /** Segment begins at a scene cut, so the camera jumped rather than eased. */
   snapped?: boolean;
+  /** `split-screen` only: the two tracks shown, index 0 on top. Order is fixed for the whole clip. */
+  targets?: [number, number];
+  arrangement?: "stacked";
 }
 
 export interface Composition {
@@ -143,12 +146,20 @@ export interface Composition {
   cropWidth: number;
   layoutTimeline: LayoutSegment[];
   cameraPath: CameraKeyframe[];
+  /** `split-screen` only: one independent camera path per half. */
+  splitPath?: { top: CameraKeyframe[]; bottom: CameraKeyframe[] };
   /** Segments actually emitted. */
   heldSegments: number;
   /** Speaker changes that min-hold rejected — see `timeline.ts`. */
   suppressedSwitches: number;
   /** Diarized speaker → face track, from phase 8. Absent when ASD did not run. */
   speakers?: Record<string, SpeakerBinding>;
+  /**
+   * Raw ASD output, carried through so `render.py` can dim the half that isn't
+   * currently talking during a `split-screen` segment without re-deriving it.
+   */
+  activeTrack?: (number | null)[];
+  sampleStep?: number;
 }
 
 /** The 9:16 window as a fraction of source width; 1 if the source is already tall. */
@@ -183,8 +194,25 @@ export function buildComposition(
   // An ASD artifact with no stabilised track says nothing about who is talking,
   // so it must not unlock a mode that is only about who is talking.
   const canSwitch = !!asd?.activeTrack?.length;
+  // "Bound to a real speaker" without diarization (phase 8's workaround, since
+  // `pyannote` stays gated): a track earns it by measured ASD talking time. The
+  // two most-talkative such tracks, ordered by first appearance — fixed for the
+  // whole clip, because phase 10 requires split-screen never swaps sides mid-clip.
+  const speakerIds = asd
+    ? speakingTracks(asd.scores, asd.sampleStep).filter((id) => tracks.some((t) => t.id === id))
+    : [];
+  const splitTargets: [number, number] | null =
+    speakerIds.length >= 2
+      ? (speakerIds
+          .slice(0, 2)
+          .sort((x, y) => (tracks.find((t) => t.id === x)?.firstSeen ?? 0) - (tracks.find((t) => t.id === y)?.firstSeen ?? 0)) as [
+          number,
+          number
+        ])
+      : null;
+  const asdReady = (m: LayoutMode) => (m === "split-screen" ? !!splitTargets : canSwitch);
   let mode = routed.modes.find(
-    (m) => IMPLEMENTED_MODES.includes(m) && (canSwitch || !NEEDS_ASD.includes(m))
+    (m) => IMPLEMENTED_MODES.includes(m) && (!NEEDS_ASD.includes(m) || asdReady(m))
   );
   let fallbackReason: string | undefined;
   if (mode !== routed.modes[0]) {
@@ -207,10 +235,22 @@ export function buildComposition(
   // answerable without watching the video.
   let layoutTimeline: LayoutSegment[];
   let cameraPath: CameraKeyframe[];
+  let splitPath: { top: CameraKeyframe[]; bottom: CameraKeyframe[] } | undefined;
   let heldSegments = 1;
   let suppressedSwitches = 0;
 
-  if (mode === "camera-switch" && canSwitch) {
+  if (mode === "split-screen" && splitTargets && asd) {
+    const tl = buildSplitAwareTimeline(
+      asd.activeTrack, asd.scores, splitTargets, asd.sampleStep, cuts, duration, track?.id ?? null, preset.minHold
+    );
+    ({ heldSegments, suppressedSwitches } = tl);
+    layoutTimeline = tl.segments;
+    // A split-aware timeline still has plain `camera-switch` segments wherever
+    // only one target is talking, so both path builders run over the same
+    // segment list — each only contributes keyframes for the mode it owns.
+    cameraPath = buildSwitchPath(layoutTimeline, tracks, cropWidth, preset);
+    splitPath = buildSplitPath(layoutTimeline, tracks, splitTargets, cropWidth, preset);
+  } else if (mode === "camera-switch" && canSwitch && asd) {
     const tl = buildLayoutTimeline(
       asd.activeTrack, asd.sampleStep, cuts, duration, mode, track?.id ?? null, preset.minHold
     );
@@ -242,7 +282,7 @@ export function buildComposition(
   }
 
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     heldSegments,
     suppressedSwitches,
     clipId,
@@ -255,6 +295,9 @@ export function buildComposition(
     cropWidth,
     layoutTimeline,
     cameraPath,
-    ...(asd ? { speakers: asd.speakers } : {}),
+    ...(splitPath ? { splitPath } : {}),
+    // Carried through unconditionally (not just for split-screen) so it costs
+    // one branch in render.py, not a shape that differs by mode.
+    ...(asd ? { speakers: asd.speakers, activeTrack: asd.activeTrack, sampleStep: asd.sampleStep } : {}),
   };
 }

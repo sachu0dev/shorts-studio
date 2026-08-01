@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildCameraPath, buildSwitchPath, groupCenter, primaryTrack, PRESETS } from "./camera.js";
+import { buildCameraPath, buildSwitchPath, buildSplitPath, groupCenter, primaryTrack, PRESETS, SPLIT_HALF_HEIGHT } from "./camera.js";
 import type { FaceTrack } from "./signals.js";
 
 const CROP = 0.3164; // a 9:16 window on a 16:9 source
@@ -131,6 +131,53 @@ test("group-crop is one still keyframe centred between the faces", () => {
 test("group-crop clamps to the frame and survives having no faces at all", () => {
   assert.equal(groupCenter([track(10, () => 0.02, 1)], CROP)[0].cx, CROP / 2);
   assert.deepEqual(groupCenter([], CROP), [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }]);
+});
+
+// ── phase 10: split-screen ─────────────────────────────────────────────────────
+
+/** A track whose vertical centre also moves, for the split-path tests. */
+function trackXY(duration: number, cxAt: (t: number) => number, cyAt: (t: number) => number, id: number): FaceTrack {
+  const samples = [];
+  for (let t = 0; t <= duration + 1e-9; t += 0.25) {
+    samples.push({ t: Math.round(t * 1000) / 1000, cx: cxAt(t), cy: cyAt(t), w: 0.1, h: 0.2, conf: 0.9 });
+  }
+  return { id, firstSeen: 0, lastSeen: duration, samples };
+}
+
+const SPLIT_SEG = (t0: number, t1: number) =>
+  ({ t0, t1, mode: "split-screen" as const, targets: [1, 2] as [number, number], arrangement: "stacked" as const });
+
+test("split halves track their own subjects independently", () => {
+  const top = trackXY(10, (t) => 0.2 + 0.02 * t, () => 0.5, 1); // drifts right
+  const bottom = trackXY(10, () => 0.8, () => 0.5, 2); // stays put
+  const { top: tp, bottom: bp } = buildSplitPath([SPLIT_SEG(0, 10)], [top, bottom], [1, 2], CROP, PRESETS.dynamic);
+
+  assert.ok(new Set(tp.map((k) => k.cx)).size > 1, "top half never moved");
+  assert.ok(bp.every((k) => k.cx === bp[0].cx), "bottom half moved despite a static subject");
+});
+
+test("split halves stay within the half-height frame", () => {
+  const top = trackXY(10, () => 0.5, () => 0.02, 1); // pinned to the top edge
+  const bottom = trackXY(10, () => 0.5, () => 0.5, 2);
+  const { top: tp } = buildSplitPath([SPLIT_SEG(0, 10)], [top, bottom], [1, 2], CROP, PRESETS.dynamic);
+
+  const halfY = SPLIT_HALF_HEIGHT / 2;
+  for (const k of tp) assert.ok(k.cy >= halfY - 1e-9 && k.cy <= 1 - halfY + 1e-9, `cy ${k.cy}`);
+});
+
+test("only split-screen segments contribute keyframes — a camera-switch segment in between is skipped", () => {
+  const top = trackXY(12, () => 0.5, () => 0.5, 1);
+  const bottom = trackXY(12, () => 0.5, () => 0.5, 2);
+  const segments = [SPLIT_SEG(0, 4), { t0: 4, t1: 8, mode: "camera-switch" as const, target: 1 }, SPLIT_SEG(8, 12)];
+  const { top: tp } = buildSplitPath(segments, [top, bottom], [1, 2], CROP, PRESETS.dynamic);
+
+  assert.ok(tp.every((k) => k.t <= 4 + 1e-9 || k.t >= 8 - 1e-9), "keyframes leaked into the camera-switch segment");
+});
+
+test("a track missing for one half still yields a renderable path", () => {
+  const { top, bottom } = buildSplitPath([SPLIT_SEG(0, 5)], [], [1, 2], CROP, PRESETS.calm);
+  assert.ok(top.every((k) => k.cx === 0.5 && k.cy === 0.5));
+  assert.ok(bottom.every((k) => k.cx === 0.5 && k.cy === 0.5));
 });
 
 test("a segment that is not a whole number of steps still cuts rather than pans", () => {

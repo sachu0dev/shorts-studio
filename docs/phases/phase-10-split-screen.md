@@ -1,5 +1,11 @@
 # Phase 10 — Split-screen renderer
 
+**Status: built.** Gates 2, 3, 4, 5, 7 pass (verified by test + one synthetic
+end-to-end render). **Gate 1 and gate 6 are unexercised** — the corpus has no
+clip with genuine, ASD-confirmed two-speaker crosstalk, and `overlapRatio`
+still depends on the same gated `pyannote` repo phase 8 hit. See "What actually
+happened".
+
 **Goal:** when two people genuinely talk over each other, show both at once.
 
 ## Why now
@@ -123,3 +129,62 @@ are exactly 1080×1920 with no seam.
 | Emphasis effect too strong, looks like a call UI | Subtle by default; it's a tunable |
 | Both people in one source rectangle (sitting close) | `facesFitOneCrop` routes to `group-crop` before split is considered — phase 9 already wins that case |
 | Most complex renderer, least-used path, rots silently | It's gated behind a measured signal, so if it never fires the corpus will show that |
+
+## What actually happened
+
+### "Bound to a real speaker" reuses phase 8's ASD workaround, not diarization
+
+The spec's precondition — both halves bound to a real speaker — reads like it
+needs `bindSpeakersToTracks`' diarized labels. It doesn't have to: phase 8
+already measures who talks from ASD scores alone (`speakingTracks`, the
+renamed and sorted `asdSpeakerCount` internals), because `pyannote` has been
+gated since phase 2 and every phase since has had to route around it. Split-
+screen's two targets are just the two most-talkative tracks by that same
+measure, ordered by first-seen time once and never recomputed — which is what
+makes "never swaps mid-clip" true by construction rather than by convention.
+
+### Entering and leaving split reuses phase 9's min-hold verbatim, via one trick
+
+`buildLayoutTimeline`'s cut/min-hold machinery already does exactly what
+split-screen needs — a switch has to earn its hold, a challenger has to earn
+its turn, cuts always win — so `buildSplitAwareTimeline` doesn't reimplement
+it. It maps "both targets are concurrently over the ASD speaking threshold" to
+a sentinel track id (`-1`, below any real id) and feeds that through the
+existing function with a `mode` selector instead of a constant. A `null`
+entry from a real face track can never collide with the sentinel, so a
+one-word backchannel gets absorbed by the exact same rule that already kills
+the phase 9 "yeah" problem. The only new code is the post-process that turns
+sentinel segments into `{ mode: "split-screen", targets, arrangement }`.
+
+### The renderer needed no new geometry, just a second, half-height crop window
+
+`render.py`'s existing crop width (`crop_w`, sized for a 9:16 window against
+the decoded frame's full height) is *already* a 9:8 window against half that
+height — `crop_w / (WORK_H/2) == (crop_w/WORK_H) * 2 == (9/16) * 2 == 9/8`
+— so a split half is `frame[y0:y0+WORK_H//2, x0:x0+crop_w]`, no separate
+scale factor to derive. `camera_cx` generalized to `camera_at(path, t, key)`
+so the same interpolator drives both halves' `cx` and `cy` — vertical
+tracking is new (`buildHalfPath` in `camera.ts`, reusing the deadzone/smooth/
+snap math via a pulled-out `trackAxis` helper rather than a second copy of
+it). Emphasis is a flat 0.82 multiply on the half ASD says isn't talking.
+
+Verified with a synthetic end-to-end render (`testsrc` source, hand-written
+composition mixing `camera-switch` and `split-screen` segments): 180 frames,
+h264_nvenc, 1080x1920, the split frame's two halves visibly pull different
+source regions with a clean seam at exactly half height, and the surrounding
+`camera-switch` frames render as a single full crop as before. `render.py
+--self-test` checks the same seam and the dimming direction with pixel
+assertions rather than eyeballing.
+
+### Gates 1 and 6 are unexercised, honestly
+
+Neither the transcript-diarization `overlapRatio` (still blocked on
+`pyannote/speaker-diarization-community-1`, unresolved since phase 2) nor a
+corpus clip with two ASD-confirmed concurrent speakers exists yet to run gate
+1 against. The one cached job with `asd/` artifacts predates phase 9's
+cross-cut re-identification fix and reports 5–6 "speaking" tracks per clip —
+fragmentation phase 9 already fixed for later runs — so it isn't trustworthy
+evidence either way and isn't cited as a result. `split-screen-duo` (the old
+fixed-half ffmpeg template) is deleted, not deprecated, per the plan: `jobs.ts`,
+`analyze.ts`'s `VALID_LAYOUTS` and LLM prompt, and `render.py`'s `EFFECTS` map
+no longer mention it.

@@ -183,13 +183,6 @@ def fx_color_grade_pop(f, t, ctx):
     return _eq(f, 1.3, 1.1)  # funny
 
 
-def fx_split_screen_duo(f, t, ctx):
-    h, w = f.shape[:2]
-    top = cv2.resize(f[0 : h // 2], (w, h // 2))
-    bot = cv2.resize(f[h // 2 : h], (w, h - h // 2))
-    return np.vstack([top, bot])
-
-
 def fx_letterbox_cinematic(f, t, ctx):
     h, w = f.shape[:2]
     bar = max(1, round(h * 0.0625))  # old: 120px of 1920
@@ -212,7 +205,6 @@ EFFECTS = {
     "vignette-pulse": fx_vignette_pulse,
     "glitch-cut": fx_glitch_cut,
     "color-grade-pop": fx_color_grade_pop,
-    "split-screen-duo": fx_split_screen_duo,
     "letterbox-cinematic": fx_letterbox_cinematic,
     "freeze-frame-callout": fx_freeze_frame_callout,
 }
@@ -221,8 +213,8 @@ EFFECTS = {
 # ── camera ────────────────────────────────────────────────────────────────────
 
 
-def camera_cx(path: list[dict], t: float) -> float:
-    """Interpolated horizontal centre at time `t`.
+def camera_at(path: list[dict], t: float, key: str = "cx") -> float:
+    """Interpolated `key` ("cx" or "cy") at time `t`.
 
     Keyframes are 0.25 s apart; frames are 1/30 s apart. Stepping the crop only
     at keyframes would quantise the pan into visible 8-frame jerks.
@@ -230,14 +222,64 @@ def camera_cx(path: list[dict], t: float) -> float:
     if not path:
         return 0.5
     if t <= path[0]["t"]:
-        return path[0]["cx"]
+        return path[0].get(key, 0.5)
     for i in range(1, len(path)):
         if path[i]["t"] < t:
             continue
         a, b = path[i - 1], path[i]
+        av, bv = a.get(key, 0.5), b.get(key, 0.5)
         span = b["t"] - a["t"]
-        return b["cx"] if span <= 0 else a["cx"] + (t - a["t"]) / span * (b["cx"] - a["cx"])
-    return path[-1]["cx"]
+        return bv if span <= 0 else av + (t - a["t"]) / span * (bv - av)
+    return path[-1].get(key, 0.5)
+
+
+def camera_cx(path: list[dict], t: float) -> float:
+    return camera_at(path, t, "cx")
+
+
+def _dim(f: np.ndarray, factor: float = 0.82) -> np.ndarray:
+    """The "not currently talking" cue for split-screen — subtle on purpose,
+    per phase 10: a hard highlight reads as a video-call UI, not an edit."""
+    return (f.astype(np.float32) * factor).clip(0, 255).astype(np.uint8)
+
+
+def composite_split(
+    frame: np.ndarray,
+    top_path: list[dict],
+    bot_path: list[dict],
+    t: float,
+    dec_w: int,
+    crop_w: int,
+    active: int | None,
+    targets: tuple[int, int],
+) -> np.ndarray:
+    """One `split-screen` frame: two independently-tracked 9:8 halves, stacked.
+
+    Each half is `crop_w` wide (same window width `camera_cx` uses for a full
+    9:16 crop) and half the decoded frame tall — which is exactly a 9:8 window,
+    since `crop_w / (work_h/2) == crop_w / work_h * 2 == (9/16) * 2 == 9/8`. So
+    the encoder's existing `scale=1080:1920` upscales each half to 1080x960
+    with no extra filter-graph work.
+    """
+    work_h = frame.shape[0]
+    half_h = work_h // 2
+    max_x = dec_w - crop_w
+    max_y = work_h - half_h
+
+    def half(path: list[dict]) -> np.ndarray:
+        x0 = min(max_x, max(0, round(camera_at(path, t, "cx") * dec_w - crop_w / 2)))
+        y0 = min(max_y, max(0, round(camera_at(path, t, "cy") * work_h - half_h / 2)))
+        return frame[y0 : y0 + half_h, x0 : x0 + crop_w]
+
+    top, bot = half(top_path), half(bot_path)
+    # Emphasis: dim whichever half is not the one ASD says is talking right now.
+    # Without this cue split-screen is unreadable — there is nothing else on
+    # screen telling the viewer whose turn it is.
+    if active == targets[0]:
+        bot = _dim(bot)
+    elif active == targets[1]:
+        top = _dim(top)
+    return np.vstack([top, bot])
 
 
 # ── render ────────────────────────────────────────────────────────────────────
@@ -293,6 +335,12 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
     crop_w = min(dec_w, round(WORK_H * OUT_W / OUT_H / 2) * 2)
     frame_bytes = dec_w * WORK_H * 3
     path = comp.get("cameraPath") or []
+    timeline = comp.get("layoutTimeline") or []
+    split_path = comp.get("splitPath") or {}
+    top_path = split_path.get("top") or []
+    bot_path = split_path.get("bottom") or []
+    active_track = comp.get("activeTrack")
+    sample_step = comp.get("sampleStep") or 0.25
 
     dec_cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error"]
     if hwaccel:
@@ -366,13 +414,24 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> tuple[int, int]:
         view = memoryview(frame.reshape(-1))
         n = 0
         last = None
+        seg_idx = 0
         try:
             while not broken.is_set() and _read_exact(dec.stdout, view):
                 t = n / FPS
-                x0 = min(max_x, max(0, round(camera_cx(path, t) * dec_w - crop_w / 2)))
-                # The slice is a view into the reused buffer, so it has to be
-                # materialised before it is queued either way.
-                f = np.ascontiguousarray(frame[:, x0 : x0 + crop_w])
+                while timeline and seg_idx + 1 < len(timeline) and timeline[seg_idx]["t1"] <= t:
+                    seg_idx += 1
+                seg = timeline[seg_idx] if timeline else None
+                if seg and seg.get("mode") == "split-screen" and seg.get("targets"):
+                    active = None
+                    if active_track is not None:
+                        k = int(t / sample_step)
+                        active = active_track[k] if 0 <= k < len(active_track) else None
+                    f = composite_split(frame, top_path, bot_path, t, dec_w, crop_w, active, tuple(seg["targets"]))
+                else:
+                    x0 = min(max_x, max(0, round(camera_cx(path, t) * dec_w - crop_w / 2)))
+                    # The slice is a view into the reused buffer, so it has to be
+                    # materialised before it is queued either way.
+                    f = np.ascontiguousarray(frame[:, x0 : x0 + crop_w])
                 for e in effects:
                     if e["t0"] <= t < e["t1"]:
                         f = EFFECTS.get(e["template"], fx_fullscreen)(f, t - e["t0"], ctx)
@@ -488,6 +547,26 @@ def _self_test() -> None:
     cut = [{"t": 0.0, "cx": 0.30}, {"t": 5.0, "cx": 0.30}, {"t": 5.0, "cx": 0.70}, {"t": 5.25, "cx": 0.70}]
     assert camera_cx(cut, 4.9) == 0.30
     assert abs(camera_cx(cut, 5.0 + 1 / FPS) - 0.70) < 1e-9
+
+    # phase 10: two synthetic tracks composite into the correct halves, with no
+    # seam — the frame dimensions must round-trip exactly.
+    sh, sw = 200, 100
+    split_frame = np.zeros((sh, sw, 3), np.uint8)
+    split_frame[: sh // 2] = (10, 20, 30)     # source's upper half
+    split_frame[sh // 2 :] = (200, 210, 220)  # source's lower half
+    top_path = [{"t": 0.0, "cx": 0.5, "cy": 0.25}]  # centred on the upper half
+    bot_path = [{"t": 0.0, "cx": 0.5, "cy": 0.75}]  # centred on the lower half
+    out = composite_split(split_frame, top_path, bot_path, 0.0, sw, sw, None, (1, 2))
+    assert out.shape == (sh, sw, 3), f"split frame shape {out.shape}, expected {(sh, sw, 3)}"
+    assert np.array_equal(out[0, 0], [10, 20, 30]), "top half pulled the wrong source region"
+    assert np.array_equal(out[-1, 0], [200, 210, 220]), "bottom half pulled the wrong source region"
+    # the boundary sits exactly at half the frame height, not off by a row
+    assert np.array_equal(out[sh // 2 - 1, 0], [10, 20, 30])
+    assert np.array_equal(out[sh // 2, 0], [200, 210, 220])
+    # active-speaker emphasis dims the half that is not talking
+    dimmed = composite_split(split_frame, top_path, bot_path, 0.0, sw, sw, 2, (1, 2))
+    assert dimmed[0, 0].mean() < out[0, 0].mean(), "inactive (top) half was not dimmed when track 2 is talking"
+    assert np.array_equal(dimmed[-1], out[-1]), "active half was dimmed too"
 
     print("[render] self-test ok")
 
