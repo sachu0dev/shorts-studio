@@ -85,12 +85,12 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [2](phase-02-whisperx.md) | WhisperX transcription | A | **built** — gate 3 needs HF repo access |
 | [3](phase-03-boundary-snapping.md) | Scene-cut + silence boundary snapping | A | **built** — gate 5 (speed) missed |
 | [4](phase-04-face-signals.md) | Face detection + signal computation | A | **built** — YuNet; overlap blocked on HF |
-| [5](phase-05-content-classifier.md) | Content-type classifier | A | **built** — all gates pass; low confidence until HF |
+| [5](phase-05-content-classifier.md) | Content-type classifier | A | **built** — all gates pass; phase 8 lifted the HF confidence ceiling |
 | [6](phase-06-opencv-render.md) | OpenCV → NVENC render path | A | **built** — gate 4 (speed) rewritten; `speed-ramp` dropped |
 | [7](phase-07-router.md) | Composition router + fullscreen-follow | A | **built** — all gates pass; `MOTION_T` + deadzone recalibrated |
 | [24](phase-24-source-catalog.md) | Source catalog + telemetry store | D | planned |
 | [28](phase-28-dashboard.md) | Operations dashboard | D | planned |
-| [8](phase-08-light-asd.md) | Light-ASD active speaker detection | A | planned |
+| [8](phase-08-light-asd.md) | Light-ASD active speaker detection | A | **built** — gates 1/4 need diarization; ASD unblocks routing |
 | [9](phase-09-camera-switch.md) | camera-switch + group-crop | A | planned |
 | [10](phase-10-split-screen.md) | Split-screen renderer | A | planned |
 | [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | planned |

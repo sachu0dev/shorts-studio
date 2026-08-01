@@ -1,6 +1,7 @@
 import type { Signals, FaceTrack, AnalysisArtifact } from "./signals.js";
 import type { CompositionType } from "./classify.js";
 import { buildCameraPath, primaryTrack, PRESETS, type CameraKeyframe, type PresetName } from "./camera.js";
+import { activeTrackIn, type AsdArtifact, type SpeakerBinding } from "./binding.js";
 
 export type LayoutMode =
   | "static-center"
@@ -109,6 +110,12 @@ export interface LayoutSegment {
   t1: number;
   mode: LayoutMode;
   target?: number;
+  /**
+   * Where `target` came from. `asd` means it was measured to be the person
+   * talking; `presence` means it is only the most-present face and nothing
+   * checked whether that face was speaking.
+   */
+  targetSource?: "asd" | "presence";
   /** Segment begins at a scene cut, so the camera jumped rather than eased. */
   snapped?: boolean;
 }
@@ -127,6 +134,8 @@ export interface Composition {
   cropWidth: number;
   layoutTimeline: LayoutSegment[];
   cameraPath: CameraKeyframe[];
+  /** Diarized speaker → face track, from phase 8. Absent when ASD did not run. */
+  speakers?: Record<string, SpeakerBinding>;
 }
 
 /** The 9:16 window as a fraction of source width; 1 if the source is already tall. */
@@ -145,7 +154,8 @@ export function buildComposition(
   duration: number,
   analysis: AnalysisArtifact | null,
   presetName: PresetName,
-  log: (line: string) => void
+  log: (line: string) => void,
+  asd: AsdArtifact | null = null
 ): Composition {
   const preset = PRESETS[presetName];
   const type = analysis?.classification?.type ?? null;
@@ -178,17 +188,22 @@ export function buildComposition(
   const bounds = [0, ...cuts.filter((c) => c > 0 && c < duration), duration];
   const layoutTimeline: LayoutSegment[] = [];
   for (let i = 0; i < bounds.length - 1; i++) {
+    // Who to frame. Phase 7 shipped this as "the most-present face" with nothing
+    // checking that face was the one talking; ASD makes it measured. Presence is
+    // still the fallback — a segment where nobody speaks has to frame someone.
+    const speaking = asd ? activeTrackIn(asd.activeTrack, asd.sampleStep, bounds[i], bounds[i + 1]) : null;
+    const target = speaking ?? track?.id;
     layoutTimeline.push({
       t0: bounds[i],
       t1: bounds[i + 1],
       mode,
-      ...(track ? { target: track.id } : {}),
+      ...(target != null ? { target, targetSource: speaking != null ? "asd" as const : "presence" as const } : {}),
       ...(i > 0 ? { snapped: true } : {}),
     });
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     clipId,
     compositionType: type,
     allowedModes: routed.modes,
@@ -199,5 +214,6 @@ export function buildComposition(
     cropWidth,
     layoutTimeline,
     cameraPath,
+    ...(asd ? { speakers: asd.speakers } : {}),
   };
 }

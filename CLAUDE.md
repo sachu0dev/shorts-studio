@@ -16,15 +16,28 @@ it until its gate passes, then start the next.**
 ```
 server/index.ts          express + SSE, runPipeline() orchestrates everything
 server/jobs.ts           in-memory job map, ClipPlan type (the central contract)
+server/stages.ts         runStage() — idempotency, timing, peak VRAM, one place
+server/artifacts.ts      LocalStore — atomic typed JSON under storage/<jobId>/
 server/systemCheck.ts    /api/system-check — binary + API-key preflight
 server/pipeline/
   download.ts            yt-dlp; run() is the shared spawn helper
-  transcribe.ts          VTT parse, whisper fallback
+  transcribe.ts          WhisperX word timings (the only transcript path)
+  boundaries.ts          snap clip edges to scene cuts + silences
   analyze.ts             provider switch (anthropic|openai|gemini) + prompt building
-  edit.ts                ASS caption file + ffmpeg render + thumbnail
+  signals.ts             Signals/AnalysisArtifact types + transcript-derived signals
+  classify.ts            compositionType from measured signals only
+  binding.ts             ASD hysteresis + speaker↔face-track binding
+  camera.ts              smoothing presets, camera path keyframes
+  router.ts              allowed layouts + the whole Composition artifact
+  edit.ts                composition request + invoke render.py + thumbnail
   captions.ts            palettes, per-word ASS override tags
-  layouts.ts             ffmpeg filter fragment per layout template
+  layouts.ts             meme overlay filter (layouts moved to render.py)
   memes.ts / fonts.ts    Giphy + Google Fonts, both fail soft
+worker/                  the Python media plane (own venv, .venv/bin/python)
+  stages/_base.py        run_stage() — args, atomic IO, VRAM sampling, teardown
+  stages/*.py            transcribe, scenes, analyze_clip, asd, render, probe
+  vendor/                third-party model code, vendored verbatim + licence
+  models/                weights (gitignored)
 web/                     Vite + React + shadcn/ui + Tailwind v4 — the UI
   src/App.tsx            sidebar/header shell, view = new job | job | system check
   src/pages/             NewJobPage, JobPage (SSE), SystemCheckPage

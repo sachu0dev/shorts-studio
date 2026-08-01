@@ -15,6 +15,24 @@ Two modes, and the second matters as much as the first:
   don't switch at all. Switching when a single crop would work is a gimmick, and
   the system must be able to decide against it.
 
+> **Inherited from phase 8 — face track ids are not identity-stable across
+> scene cuts, and this is the phase where that becomes load-bearing.** Measured
+> on a multi-cam window: **13 of 22 tracks span a cut**, and one track covered
+> *two different people* — the tracker matched them because they occupied a
+> similar position either side of the cut. `camera-switch` cutting to "track 2"
+> across such a boundary lands on the wrong person while claiming to be right.
+>
+> Retiring tracks at every cut was tried in phase 8 and **reverted**: on a solo
+> window with 6 cuts in 25 s the primary track shatters into 7 fragments,
+> `distinctFaceTracks` drops to 0, and `buildCameraPath` gets a 4 s track for a
+> 25 s clip. It fixes identity by destroying phase 7.
+>
+> The fix that works for both is **re-identification across cuts** — match a
+> post-cut face to a pre-cut track by appearance rather than position — so a
+> track id survives a cut only when it is the same person. Do it here, before
+> the first switch is rendered, and add it to this phase's gate: *a switch never
+> lands on a different person than the segment claims.*
+
 ## Scope
 
 Both modes, plus the three rules that separate "works" from "looks broken".

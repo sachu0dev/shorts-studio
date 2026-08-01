@@ -35,6 +35,13 @@ export interface Signals {
    * which can be unavailable, whereas "were any words spoken" always holds.
    */
   wordCount: number;
+  /**
+   * Speakers measured by ASD (phase 8) — how many face tracks actually talk.
+   * Absent until the ASD stage has run for the clip. Preferred over
+   * `speakerCount` wherever both exist: this one owes nothing to diarization,
+   * which is gated and returns 0 on every real job.
+   */
+  asdSpeakerCount?: number;
   overlapRatio: number;
   turnRate: number;
   sceneCuts: number[];

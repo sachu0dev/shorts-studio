@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { route, buildComposition, cropWidthFor, ROUTE_THRESHOLDS, type LayoutMode } from "./router.js";
 import type { Signals, AnalysisArtifact } from "./signals.js";
 import type { CompositionType } from "./classify.js";
+import type { AsdArtifact } from "./binding.js";
 
 /** Every field zero, so each case names only the signals it is about. */
 function sig(overrides: Partial<Signals> = {}): Signals {
@@ -124,4 +125,42 @@ test("the layout timeline breaks at every scene cut and marks the jump", () => {
   assert.deepEqual(c.layoutTimeline.map((s) => [s.t0, s.t1, s.snapped ?? false]),
     [[0, 3, false], [3, 7, true], [7, 10, true]]);
   assert.equal(c.layoutTimeline[0].target, 7); // the face track id, not a speaker label
+});
+
+// ── phase 8: the target is measured, not assumed ──────────────────────────────
+
+/** ASD saying track 4 talks for the first 5s and track 7 for the rest. */
+function asd(): AsdArtifact {
+  const n = 40; // 10s at 4Hz
+  return {
+    schemaVersion: 1, clipId: "clip1", sampleStep: 0.25,
+    scores: {},
+    activeTrack: Array.from({ length: n }, (_, k) => (k * 0.25 < 5 ? 4 : 7)),
+    speakers: { SPEAKER_00: { trackId: 4, confidence: 0.8 } },
+    asdSpeakerCount: 2,
+  };
+}
+
+test("layoutTimeline targets the ASD active speaker, not just the most-present face", () => {
+  // Track 7 is the only face track, so presence alone would say 7 everywhere.
+  const a = analysis({ signals: sig({ subjectMotion: 0.072, sceneCuts: [5] }) });
+  const c = buildComposition("clip1", 10, a, "calm", () => {}, asd());
+
+  assert.deepEqual(c.layoutTimeline.map((s) => [s.target, s.targetSource]),
+    [[4, "asd"], [7, "asd"]]);
+  assert.deepEqual(c.speakers, { SPEAKER_00: { trackId: 4, confidence: 0.8 } });
+});
+
+test("without ASD the target falls back to presence and says so", () => {
+  const c = buildComposition("clip1", 10, analysis(), "calm", () => {});
+  assert.equal(c.layoutTimeline[0].target, 7);
+  assert.equal(c.layoutTimeline[0].targetSource, "presence");
+  assert.equal(c.speakers, undefined);
+});
+
+test("a segment where nobody speaks still frames someone", () => {
+  const silent = { ...asd(), activeTrack: Array(40).fill(null) };
+  const c = buildComposition("clip1", 10, analysis(), "calm", () => {}, silent);
+  assert.equal(c.layoutTimeline[0].target, 7);
+  assert.equal(c.layoutTimeline[0].targetSource, "presence");
 });

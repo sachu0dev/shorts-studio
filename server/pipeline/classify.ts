@@ -35,7 +35,11 @@ export function classify(sig: Signals): Classification {
   // track id, so the 2-person podcast counts 3 tracks (11 unfiltered) but a
   // correct 2 concurrent faces. Tracking can be fooled by cuts; counting can't.
   const people = sig.medianConcurrentFaces;
-  const speakers = sig.speakerCount;
+  // ASD, when it has run, is the better answer to "how many people speak":
+  // it is measured from video+audio, while `speakerCount` comes from gated
+  // diarization and reads 0 on every real job — which used to pin multi-speaker
+  // clips at 0.55 confidence, below phase 7's routing floor.
+  const speakers = sig.asdSpeakerCount ?? sig.speakerCount;
 
   if (cov < T.faceCoverage) {
     const confidence = inBand(cov, T.ambiguousBand) ? 0.5 : 0.9;

@@ -100,3 +100,23 @@ test("all-zero signals never throw", () => {
   assert.equal(got.type, "b-roll");
   assert.ok(got.reason.length > 0);
 });
+
+// ── phase 8: ASD is a speaker count that owes nothing to diarization ──────────
+
+test("ASD lifts a two-face clip past the routing floor while pyannote stays gated", () => {
+  // What every real job looks like today: faces on screen, zero speaker labels.
+  const gated = sig({ faceCoverage: 0.98, faceSizeRatio: 0.29, medianConcurrentFaces: 2, speakerCount: 0 });
+  const before = classify(gated);
+  assert.equal(before.confidence, 0.55, "the pre-ASD ceiling moved — the test below is meaningless now");
+
+  const after = classify({ ...gated, asdSpeakerCount: 2 });
+  assert.equal(after.type, "multi-speaker");
+  assert.ok(after.confidence >= 0.6, `ASD left confidence at ${after.confidence}`);
+});
+
+test("ASD hearing one voice on two faces means a listener in frame, not a debate", () => {
+  const s = sig({ faceCoverage: 0.98, faceSizeRatio: 0.29, medianConcurrentFaces: 2, speakerCount: 2 });
+  // Diarization says two speakers; ASD measured only one of the faces talking.
+  assert.equal(classify({ ...s, asdSpeakerCount: 1 }).type, "talking-head");
+  assert.equal(classify(s).type, "multi-speaker");
+});

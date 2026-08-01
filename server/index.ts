@@ -20,7 +20,10 @@ import { snapPlans, type ScenesArtifact } from "./pipeline/boundaries.js";
 import { classify } from "./pipeline/classify.js";
 import { buildComposition, type Composition } from "./pipeline/router.js";
 import type { PresetName } from "./pipeline/camera.js";
-import { transcriptSignals, type AnalysisArtifact } from "./pipeline/signals.js";
+import { transcriptSignals, wordsInWindow, type AnalysisArtifact } from "./pipeline/signals.js";
+import {
+  asdSpeakerCount, bindSpeakersToTracks, stabilizeActiveTrack, type AsdArtifact,
+} from "./pipeline/binding.js";
 import { runPythonStage } from "./pipeline/python.js";
 import { runSystemCheck } from "./systemCheck.js";
 import { LocalStore, type Artifact } from "./artifacts.js";
@@ -316,6 +319,63 @@ async function runPipeline(job: Job) {
     }
   }
 
+  // 6b. active speaker detection — the only stage that knows WHICH face is
+  // talking. GPU, one clip at a time: face detection is CPU and WhisperX has
+  // exited, so ASD has the 6 GB card to itself.
+  const asds = new Map<string, AsdArtifact>();
+  for (const plan of plans) {
+    const clipId = `clip${plan.index}`;
+    const analysis = analyses.get(clipId);
+    if (!analysis?.faceTracks?.length) continue; // nothing to score
+    progress(job, `Detecting active speaker ${plan.index}/${plans.length}`);
+    const asdStage: Stage<void, AsdArtifact> = {
+      name: `asd:${clipId}`,
+      output: `asd/${clipId}.json`,
+      schemaVersion: 1,
+      async run() {
+        await runPythonStage("asd", jobDir, log, ["--clip-id", clipId]);
+        const written = await store.readJson<AsdArtifact>(job.id, `asd/${clipId}.json`);
+        if (!written) throw new Error(`asd finished but wrote no asd/${clipId}.json`);
+        // Python owns the scores; stabilisation and binding stay in Node where
+        // they are unit-testable without a GPU.
+        return {
+          ...written,
+          schemaVersion: 1,
+          activeTrack: stabilizeActiveTrack(written.scores),
+          speakers: bindSpeakersToTracks(
+            written.scores, written.sampleStep,
+            wordsInWindow(words, plan.start, plan.end), plan.start, log
+          ),
+          asdSpeakerCount: asdSpeakerCount(written.scores, written.sampleStep),
+        };
+      },
+    };
+    try {
+      const asd = await runStage(asdStage, ctx, undefined);
+      asds.set(clipId, asd);
+      const bound = Object.entries(asd.speakers)
+        .map(([s, b]) => `${s}→${b.trackId ?? "none"}`).join(", ");
+      log(`${clipId}: ${asd.asdSpeakerCount} speaking face(s)${bound ? ` — ${bound}` : ""}`);
+
+      // ASD counts speakers without diarization, so re-classifying here is what
+      // lifts a multi-speaker clip past phase 7's 0.6 floor while pyannote stays
+      // gated. The analysis artifact keeps its own answer; this one is recorded
+      // in the composition, which is where the decision that mattered lives.
+      const signals = { ...analysis.signals, asdSpeakerCount: asd.asdSpeakerCount };
+      const revised = classify(signals);
+      if (revised.type !== analysis.classification?.type ||
+          revised.confidence !== analysis.classification?.confidence) {
+        log(`${clipId}: reclassified with ASD — ${revised.type} (confidence ${revised.confidence}) — ${revised.reason}`);
+      }
+      analyses.set(clipId, { ...analysis, signals, classification: revised });
+      plan.compositionType = revised.type;
+    } catch (e: any) {
+      // Phase 9 onwards degrade to presence-based framing; a render must not die
+      // because the speaker could not be identified (CLAUDE.md rule 5).
+      log(`⚠️ ASD failed for ${clipId} (${e?.message || e}) — framing the most-present face instead`);
+    }
+  }
+
   // 7. composition — the edit decision for every clip, before any pixels move.
   // Deliberately its own pass: the decisions are reviewable, and re-rendering in
   // a different style re-runs this and nothing upstream of it.
@@ -326,9 +386,11 @@ async function runPipeline(job: Job) {
     const composeStage: Stage<void, Composition> = {
       name: `compose:${clipId}`,
       output: `composition/${clipId}.json`,
-      schemaVersion: 1,
+      schemaVersion: 2, // 2: + layoutTimeline[].targetSource, + speakers (phase 8)
       async run() {
-        return buildComposition(clipId, plan.end - plan.start, analyses.get(clipId) ?? null, PRESET, log);
+        return buildComposition(
+          clipId, plan.end - plan.start, analyses.get(clipId) ?? null, PRESET, log, asds.get(clipId) ?? null
+        );
       },
     };
     const c = await runStage(composeStage, ctx, undefined);
