@@ -104,6 +104,9 @@ export interface EditSummary {
   suppressedSwitches?: number;
   encoder?: string;
   frames?: number;
+  /** Whole-clip fraction of faces a 9:16 crop keeps whole — phase 29. */
+  retention?: Record<string, number>;
+  narrowestSafe?: string;
 }
 
 export interface Job {

@@ -50,17 +50,17 @@ topmost unbuilt row, and do not infer the order from the numbers.**
 | # | Phase | Why it sits here |
 |---|---|---|
 | ✅ | 0–10 | built — artifact store → split-screen renderer |
-| **1** | **[29 — Content retention signal](phase-29-content-retention.md)** | **← START HERE.** Measures what a crop discards, over any time range. Changes no rendered frame |
-| 2 | [30 — Adaptive framing window](phase-30-adaptive-framing.md) | Per-segment 9:16 ⇄ 4:3 ⇄ 16:9. Needs 29's number |
-| 3 | [31 — Panel framing & speaker priority](phase-31-panel-framing.md) | Fixes the live centre-crop defect. Needs 30's wide window |
-| 4 | [11 — Gaming composition](phase-11-gaming.md) | Resumes the original Block A. Cheaper after 30 delivers `blurred-fill` |
-| 5 | [12 — LLM taste layer](phase-12-llm-taste.md) | Per-segment taste, on top of a framing layer that is finally correct |
-| 6 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
-| 7 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
-| 8 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
-| 9 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **Blocked until 29–31 pass** |
-| 10 | 16 … 23 | Block C — local models, Content Hunt, scripts. **Blocked until 29–31 pass** |
-| 11 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
+| ✅ | [29 — Content retention signal](phase-29-content-retention.md) | **built** — gates 2/4/5 pass; gate 1 passes on the one clean local solo clip; gate 3 unconfirmed (only stale pre-phase-9 ASD data available) |
+| **1** | **[30 — Adaptive framing window](phase-30-adaptive-framing.md)** | **← START HERE.** Per-segment 9:16 ⇄ 4:3 ⇄ 16:9. Needs 29's number |
+| 2 | [31 — Panel framing & speaker priority](phase-31-panel-framing.md) | Fixes the live centre-crop defect. Needs 30's wide window |
+| 3 | [11 — Gaming composition](phase-11-gaming.md) | Resumes the original Block A. Cheaper after 30 delivers `blurred-fill` |
+| 4 | [12 — LLM taste layer](phase-12-llm-taste.md) | Per-segment taste, on top of a framing layer that is finally correct |
+| 5 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
+| 6 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
+| 7 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
+| 8 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **Blocked until 29–31 pass** |
+| 9 | 16 … 23 | Block C — local models, Content Hunt, scripts. **Blocked until 29–31 pass** |
+| 10 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
 
 Two rules that outrank the table: **finish the phase you are on before starting
 the next** (a half-built phase is worse than an unstarted one), and **update the
@@ -135,8 +135,8 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [8](phase-08-light-asd.md) | Light-ASD active speaker detection | A | **built** — gates 1/4 need diarization; ASD unblocks routing |
 | [9](phase-09-camera-switch.md) | camera-switch + group-crop | A | **built** — gate 4 restated; group-crop unexercised on real footage |
 | [10](phase-10-split-screen.md) | Split-screen renderer | A | **built** — gates 1/6 unexercised, no corpus footage with confirmed crosstalk |
-| [29](phase-29-content-retention.md) | Content retention signal | A | **next** — measures what a crop discards, over any time range |
-| [30](phase-30-adaptive-framing.md) | Adaptive framing window, per segment | A | planned — mid-clip 9:16 ⇄ 4:3 ⇄ 16:9; unblocks `blurred-fill` for phase 11 |
+| [29](phase-29-content-retention.md) | Content retention signal | A | **built** — gates 2/4/5 pass; gate 1 on one clean clip; gate 3 unconfirmed (stale ASD data) |
+| [30](phase-30-adaptive-framing.md) | Adaptive framing window, per segment | A | **next** — mid-clip 9:16 ⇄ 4:3 ⇄ 16:9; unblocks `blurred-fill` for phase 11 |
 | [31](phase-31-panel-framing.md) | Panel framing & speaker priority | A | planned — fixes the reproduced centre-crop defect |
 | [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | planned |
 | [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | planned |

@@ -24,6 +24,7 @@ import { transcriptSignals, wordsInWindow, type AnalysisArtifact } from "./pipel
 import {
   asdSpeakerCount, bindSpeakersToTracks, stabilizeActiveTrack, type AsdArtifact,
 } from "./pipeline/binding.js";
+import { summarizeRetention } from "./pipeline/retention.js";
 import { runPythonStage } from "./pipeline/python.js";
 import { runSystemCheck } from "./systemCheck.js";
 import { LocalStore, type Artifact } from "./artifacts.js";
@@ -281,7 +282,7 @@ async function runPipeline(job: Job) {
     const analyzeStage: Stage<void, AnalysisArtifact> = {
       name: `analyze:${clipId}`,
       output: `analysis/${clipId}.json`,
-      schemaVersion: 3, // 3: cross-cut track re-identification (phase 9)
+      schemaVersion: 4, // 4: content retention signal (phase 29)
       async run() {
         await runPythonStage("analyze_clip", jobDir, log, [
           "--clip-id", clipId,
@@ -292,9 +293,11 @@ async function runPipeline(job: Job) {
         if (!cv) throw new Error(`analysis finished but wrote no analysis/${clipId}.json`);
         // CV signals come from Python; speaker/turn/overlap/cuts are derived from
         // artifacts Node already holds. Merged so one file explains one edit.
+        const retention = summarizeRetention(cv.faceTracks, cv.sourceWidth, cv.sourceHeight, plan.end - plan.start);
         const signals = {
           ...cv.signals,
           ...transcriptSignals(words, scenes?.cuts ?? [], plan.start, plan.end),
+          ...(retention ? { retention: retention.retention, narrowestSafe: retention.narrowestSafe } : {}),
         };
         // Classified here, not in Python: it needs the transcript-derived
         // signals, and it has to stay unit-testable without invoking a stage.
@@ -308,6 +311,9 @@ async function runPipeline(job: Job) {
       const sg = a.signals;
       log(`${clipId}: ${sg.distinctFaceTracks} face(s), coverage ${sg.faceCoverage}, ` +
           `${sg.speakerCount} speaker(s), overlap ${sg.overlapRatio}, motion ${sg.subjectMotion}`);
+      if (sg.retention) {
+        log(`${clipId}: retention 9:16=${sg.retention["9:16"]} narrowestSafe=${sg.narrowestSafe}`);
+      }
       if (a.classification) {
         // When a clip is framed wrong, this line is the first thing to read.
         log(`${clipId}: ${a.classification.type} (confidence ${a.classification.confidence}) — ${a.classification.reason}`);
@@ -361,11 +367,22 @@ async function runPipeline(job: Job) {
       // lifts a multi-speaker clip past phase 7's 0.6 floor while pyannote stays
       // gated. The analysis artifact keeps its own answer; this one is recorded
       // in the composition, which is where the decision that mattered lives.
-      const signals = { ...analysis.signals, asdSpeakerCount: asd.asdSpeakerCount };
+      const retention = summarizeRetention(
+        analysis.faceTracks, analysis.sourceWidth, analysis.sourceHeight,
+        plan.end - plan.start, asd.activeTrack, asd.sampleStep
+      );
+      const signals = {
+        ...analysis.signals,
+        asdSpeakerCount: asd.asdSpeakerCount,
+        ...(retention ? { speakerRetention: retention.speakerRetention, narrowestSafe: retention.narrowestSafe } : {}),
+      };
       const revised = classify(signals);
       if (revised.type !== analysis.classification?.type ||
           revised.confidence !== analysis.classification?.confidence) {
         log(`${clipId}: reclassified with ASD — ${revised.type} (confidence ${revised.confidence}) — ${revised.reason}`);
+      }
+      if (signals.speakerRetention) {
+        log(`${clipId}: speakerRetention 9:16=${signals.speakerRetention["9:16"]} narrowestSafe=${signals.narrowestSafe}`);
       }
       analyses.set(clipId, { ...analysis, signals, classification: revised });
       plan.compositionType = revised.type;
@@ -431,6 +448,7 @@ async function runPipeline(job: Job) {
     };
     const out = await runStage(renderStage, ctx, undefined);
     const c = compositions.get(clipId);
+    const retentionSig = analyses.get(clipId)?.signals;
     job.outputs.push({
       clip: `/files/${job.id}/${out.clip}`,
       thumbnail: `/files/${job.id}/${out.thumbnail}`,
@@ -447,6 +465,8 @@ async function runPipeline(job: Job) {
         suppressedSwitches: c.suppressedSwitches,
         encoder: out.encoder,
         frames: out.frames,
+        retention: retentionSig?.retention,
+        narrowestSafe: retentionSig?.narrowestSafe,
       },
     });
     progress(job, `Clip ${plan.index} done`, `Rendered ${path.basename(out.clip)} — ${out.encoder ?? "?"}, ${out.frames ?? "?"} frames`);

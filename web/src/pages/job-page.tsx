@@ -200,6 +200,12 @@ function ClipCard({ output }: { output: NonNullable<Job["outputs"]>[number] }) {
             {edit.fallbackReason && (
               <div className="mt-1 text-destructive">⚠ {edit.fallbackReason}</div>
             )}
+            {edit.retention && edit.retention["9:16"] < 0.9 && (
+              <div className="mt-1 text-destructive">
+                ⚠ this 9:16 crop keeps only {Math.round(edit.retention["9:16"] * 100)}% of the faces on
+                screen — {edit.narrowestSafe} would keep more (phase 30 widens this)
+              </div>
+            )}
             <div className="mt-1 opacity-60">
               allowed [{edit.allowedModes.join(", ")}] · {edit.preset} preset · {edit.cameraKeyframes}{" "}
               keyframe{edit.cameraKeyframes === 1 ? "" : "s"} · {edit.encoder ?? "?"} · {edit.frames ?? "?"} frames

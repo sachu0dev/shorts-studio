@@ -1,5 +1,11 @@
 # Phase 29 — Content retention signal
 
+**Status: built.** Gates 2, 4, 5 pass. Gate 1 passes on the one genuinely solo
+clip available locally; the locked corpus solo source has no local artifact to
+test against. Gate 3 is **not confirmed** — the only real ASD artifact
+available predates phase 9's cross-cut fix and is already documented as
+unreliable. See "What actually happened".
+
 **Goal:** make "how much of what matters did this crop throw away?" a number in
 the artifact, for every clip, before any renderer changes.
 
@@ -197,3 +203,59 @@ the measured table within ±2%.
 | Face boxes are a poor proxy for "important content" | True, and stated: this phase claims faces only. Action regions join in phase 11, text later. A partial metric beats today's absence of one |
 | Threshold picked from one clip | It is picked to be far from that clip's numbers, and gate 1 checks the opposite end (solo clips) so both tails are exercised |
 | `speakerRetention` absent when ASD fails | Absent, never defaulted to 1.0 — phase 31 must not read "unknown" as "safe" |
+
+## What actually happened
+
+### The per-range design held; the clip-level scalar it replaced would not have
+
+The original draft of this phase computed retention once per clip in
+`analyze_clip.py`. Caught in review before implementation: a single number
+cannot drive per-segment framing — phase 30 needs a *different* answer for a
+solo close-up than for the panel shot two segments later, and one scalar
+averages the two into something that describes neither. `retentionOver` is a
+pure function of `[t0, t1)` instead, computed in Node from `faceTracks[]`
+already in the artifact, so no Python change was needed at all. The test that
+exists to guard exactly this — one track alone for 8 s, eight tracks for the
+next 12 s, and the two ranges must score differently — passes.
+
+### Noise tracks were the first real bug the gate caught
+
+Gate 1 ("solo clips score ≥ 0.95") failed on the first real clip tried.
+Investigating rather than adjusting the threshold: the clip had 22 raw face
+tracks, most of them 2–6-sample misdetections (background people, false
+positives) that `retentionOver` was weighting equally against the one real,
+persistent face. Fixed with `MIN_TRACK_SAMPLES = 4` — a track needs at least 1 s
+of evidence to count, the same floor `binding.ts` already uses for
+`speakingTracks`. A genuinely solo corpus-style clip (`Kvg0L1U0w0/clip1`) now
+scores exactly `1.0` at every aspect.
+
+One non-corpus clip (`BFgmpWALTo/clip1`) still scores `0.817` at 9:16 even after
+the fix. Checked directly against its raw samples: it has five small
+(`w ≈ 0.024`, background-sized) faces genuinely on screen together for about
+10% of the clip — a real crowd cameo, not noise. That is correct metric
+behaviour, not a bug, and it is why gate 1 is reported against the one clip
+confirmed clean rather than claimed for all solo-*looking* footage.
+
+### Gate 2 reproduced the motivating measurement almost exactly
+
+`retentionOver` over the full panel clip (`vI57GWdQo5` clip 2) returns
+`9:16=0.422, 1:1=0.701, 4:3=0.811, 16:9=0.985` against the documented
+`0.424 / 0.704 / 0.815 / 0.985` — every value within 0.4%, well inside the ±2%
+gate. The `MIN_TRACK_SAMPLES` fix that corrected gate 1 barely moved this row
+(0.424 → 0.422): the panel's tracks are real people, not noise, so the filter
+correctly left them alone.
+
+### Gate 3 could not be confirmed, and the honest reason is worth recording
+
+The only local artifact with a real ASD score (`Y-6dtefQ3G/asd/clip2.json`)
+predates phase 9's cross-cut re-identification fix — phase 10's notes already
+flag it as reporting 5–6 fragmentary "speaking" tracks per clip, the exact
+defect phase 9 fixed for runs after it. Run through `speakerRetentionOver`
+anyway for a data point: `retention=0.674` vs `speakerRetention=0.556` at
+9:16 — **inverted** from what the gate expects, which the gate's own text
+predicts for a bad ASD binding (*"if this inverts, the ASD binding is
+wrong"*). That is consistent with the artifact being known-stale, not new
+evidence that `speakerRetentionOver` itself is wrong — the unit test covering
+the same claim (a centred speaker beats an edge-sitting bystander) passes. Gate
+3 needs a fresh end-to-end run past phase 9 to confirm on real data; it is not
+claimed here.

@@ -45,6 +45,17 @@ export interface Signals {
   overlapRatio: number;
   turnRate: number;
   sceneCuts: number[];
+  /**
+   * Whole-clip reporting only (phase 29) — a preference, not a decision.
+   * Phase 30 calls `retentionOver` per segment; it will routinely disagree with
+   * this row, which is expected: a clip that summarises to 16:9 can still open
+   * on a correct 9:16 close-up. Absent when the clip has no real faces at all.
+   */
+  retention?: Record<string, number>;
+  /** Same, restricted to moments where ASD names this face the active speaker. */
+  speakerRetention?: Record<string, number>;
+  /** Narrowest aspect clearing the retention floor(s) over the whole clip. */
+  narrowestSafe?: string;
 }
 
 export interface AnalysisArtifact extends Artifact {
