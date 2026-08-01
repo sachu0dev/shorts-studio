@@ -27,7 +27,9 @@ export type LayoutTemplate =
   | "fullscreen"
   | "blurred-fill"
   | "meme-corner"
-  | "zoom-punch"
+  // "zoom-punch" was removed after live feedback: `t % 2.0` pulsed the zoom
+  // every 2s for the clip's entire duration rather than once, which read as a
+  // stuck effect looping on the video, not a style choice.
   | "shake-on-beat"
   // "speed-ramp" was removed in phase 6. Its ffmpeg form applied a video-only
   // setpts, so audio (and the burned captions) drifted during every ramp window.

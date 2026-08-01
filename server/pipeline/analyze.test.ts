@@ -24,11 +24,11 @@ test("sanitizePlan defaults missing enum fields instead of throwing", () => {
 
 test("sanitizePlan preserves valid provided values", () => {
   const p = sanitizePlan({
-    index: 0, start: 0, end: 20, contentMode: "gaming", layoutTemplate: "zoom-punch",
+    index: 0, start: 0, end: 20, contentMode: "gaming", layoutTemplate: "shake-on-beat",
     monetizationFlag: { risky: true, reasons: ["profanity"] },
   } as any, 100);
   assert.equal(p.contentMode, "gaming");
-  assert.equal(p.layoutTemplate, "zoom-punch");
+  assert.equal(p.layoutTemplate, "shake-on-beat");
   assert.deepEqual(p.monetizationFlag, { risky: true, reasons: ["profanity"] });
 });
 

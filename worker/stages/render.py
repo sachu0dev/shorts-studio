@@ -135,17 +135,6 @@ def fx_blurred_fill(f, t, ctx):
     return out
 
 
-def _zoom(f, z):
-    h, w = f.shape[:2]
-    cw, ch = int(w / z), int(h / z)
-    x, y = (w - cw) // 2, (h - ch) // 2
-    return cv2.resize(f[y : y + ch, x : x + cw], (w, h), interpolation=cv2.INTER_LINEAR)
-
-
-def fx_zoom_punch(f, t, ctx):
-    return _zoom(f, 1.08) if (t % 2.0) <= 0.3 else f
-
-
 def fx_shake_on_beat(f, t, ctx):
     h, w = f.shape[:2]
     mx, my = max(2, round(w * 0.0185)), max(2, round(h * 0.0104))  # old: 20px of 1080x1920
@@ -200,7 +189,6 @@ EFFECTS = {
     "fullscreen": fx_fullscreen,
     "meme-corner": fx_meme_corner,
     "blurred-fill": fx_blurred_fill,
-    "zoom-punch": fx_zoom_punch,
     "shake-on-beat": fx_shake_on_beat,
     "vignette-pulse": fx_vignette_pulse,
     "glitch-cut": fx_glitch_cut,
@@ -515,9 +503,6 @@ def _self_test() -> None:
 
     # blur reduces local variance
     assert fx_blurred_fill(noise, 0, ctx)[h - 10 :].std() < noise[h - 10 :].std()
-    # zoom-punch is a no-op outside its 0.3s window and a change inside it
-    assert np.array_equal(fx_zoom_punch(noise, 1.0, ctx), noise)
-    assert not np.array_equal(fx_zoom_punch(noise, 0.1, ctx), noise)
     # gaming grade raises saturation: a flat grey stays grey, colour spreads
     assert np.array_equal(fx_color_grade_pop(mid, 0, ctx), mid)
     chan = np.zeros((h, w, 3), np.uint8)
