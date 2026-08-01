@@ -93,6 +93,7 @@ test("two faces with no speaker labels is multi-speaker, but under 0.6", () => {
   assert.equal(got.type, "multi-speaker");
   assert.ok(got.confidence < 0.6);
   assert.match(got.reason, /no speaker labels/);
+  assert.match(got.reason, /diarization unavailable/);
 });
 
 test("all-zero signals never throw", () => {

@@ -93,22 +93,44 @@ def romanize(text: str) -> str:
 #  so that single window locks the WHOLE transcript to English even when the
 #  rest of the video is Hinglish — wrong decoding throughout, and phase 2's
 #  wav2vec2 alignment model gets picked for the wrong language too.
+#
+#  Fix: sample at 30 %, 55 %, and 70 % of the clip duration. 0.30 reliably
+#  skips a typical 30–60 s English intro; 0.55 and 0.70 land in the main body
+#  of the video where the real language lives. We deliberately skip both the
+#  cold-open (<30 %) and the outro/CTA (>80 %) zones.
 LANG_SAMPLE_SECONDS = 30
-LANG_SAMPLE_FRACTIONS = (0.25, 0.5, 0.75)  # skip the cold open and any outro/CTA
+LANG_SAMPLE_FRACTIONS = (0.30, 0.55, 0.70)  # past intro → mid-body → late-body
 
 
 def _detect_language(model, audio) -> str:
-    """Vote across a few points spread through the real duration, not just the
-    first 30s. `detect_language` only runs the encoder on one mel-spectrogram
-    chunk, so sampling three of them is cheap next to a full transcription."""
+    """Vote across three points spread through the real duration, deliberately
+    skipping the first 30 % (cold-open / English intro) and last 20 % (outro).
+    `detect_language` only runs the encoder on one mel-spectrogram chunk, so
+    sampling three of them is cheap next to a full transcription.
+
+    Sampling positions (fraction of total length):
+      • 30 % — just past any English intro / sponsor segment
+      • 55 % — mid-body, typically the main content language
+      • 70 % — late-body, confirms the dominant language
+
+    Majority vote wins; a perfect 3-way split falls back to the middle (55 %)
+    sample as the most representative single point.
+    """
     window = LANG_SAMPLE_SECONDS * SAMPLE_RATE
     if len(audio) <= window:
+        # Short clip — can't skip the intro; sample the whole thing as-is.
         return model.detect_language(audio)
 
     votes = []
     for frac in LANG_SAMPLE_FRACTIONS:
+        # Centre the 30-second window on `frac`, clamped so it never overruns.
         start = min(len(audio) - window, max(0, int(len(audio) * frac) - window // 2))
-        votes.append(model.detect_language(audio[start : start + window]))
+        lang = model.detect_language(audio[start : start + window])
+        print(
+            f"[transcribe] language sample @ {frac:.0%} of clip → {lang}",
+            flush=True,
+        )
+        votes.append(lang)
     print(f"[transcribe] language votes across the clip: {votes}", flush=True)
     # majority; an even 3-way split falls back to the middle sample as the
     # most representative single point rather than an arbitrary pick
@@ -116,16 +138,53 @@ def _detect_language(model, audio) -> str:
 
 
 def transcribe(audio, device: str):
-    """Walks the VRAM ladder. Returns (result, tier)."""
+    """Walks the VRAM ladder. Returns (result, tier).
+
+    Language is detected once with the first model that loads successfully —
+    even if that model later OOMs during transcription. The detected language
+    is then reused for every fallback tier, because a weaker model's language
+    probe is less reliable than the stronger model's measured result.
+
+    Why this matters: large-v3 (7 GB) often correctly identifies Hinglish as
+    `hi` before running out of VRAM for the full transcription. distil-large-v3
+    (3 GB) loads fine but its language probe is less accurate and can flip to
+    `en` for the same audio — the OOM was in the *transcription*, not the probe.
+    We trust the stronger model's language measurement and carry it forward.
+    """
     import whisperx
 
+    # ── Step 1: detect language with the best model we can load ──────────────
+    # Walk the ladder just for the probe; stop as soon as one succeeds.
+    detected_language: str | None = None
+    for name, compute_type, _batch_size in MODEL_LADDER:
+        try:
+            print(f"[transcribe] probing language with {name} ({compute_type})", flush=True)
+            probe_model = whisperx.load_model(name, device, compute_type=compute_type)
+            detected_language = _detect_language(probe_model, audio)
+            del probe_model
+            _free()
+            print(f"[transcribe] language locked to '{detected_language}' (from {name})", flush=True)
+            break
+        except Exception as probe_err:  # noqa: BLE001
+            _free()
+            if _is_oom(probe_err):
+                print(f"[transcribe] {name} OOM during language probe; trying next tier", flush=True)
+                continue
+            # Non-OOM during probe — re-raise immediately, something is wrong.
+            raise
+
+    if detected_language is None:
+        # Every model OOM'd even for the probe — nothing left to try.
+        raise RuntimeError("no model fit in VRAM even for language detection")
+
+    # ── Step 2: transcribe with the best model that can handle the full audio ─
     last = None
     for name, compute_type, batch_size in MODEL_LADDER:
         try:
             print(f"[transcribe] loading {name} ({compute_type})", flush=True)
             model = whisperx.load_model(name, device, compute_type=compute_type)
-            language = _detect_language(model, audio)
-            result = model.transcribe(audio, batch_size=batch_size, language=language)
+            # Reuse the language we already measured — do NOT re-probe here.
+            result = model.transcribe(audio, batch_size=batch_size, language=detected_language)
             del model
             _free()
             return result, f"{name}/{compute_type}"
@@ -263,16 +322,17 @@ def _self_test() -> None:
             self.calls += 1
             return lang
 
-    long_audio = np.zeros(200 * SAMPLE_RATE, dtype="float32")  # well past the 3-sample split
+    # 200 s audio → well past the 3-sample split at 30/55/70 %
+    long_audio = np.zeros(200 * SAMPLE_RATE, dtype="float32")
 
-    # a wrong cold-open guess ("en") is outvoted by the two real samples
+    # English intro (30 %) is outvoted by Hinglish mid/late body
     assert _detect_language(FakeModel(["en", "hi", "hi"]), long_audio) == "hi"
-    # unanimous
+    # unanimous Hinglish
     assert _detect_language(FakeModel(["hi", "hi", "hi"]), long_audio) == "hi"
-    # a 3-way split falls back to the middle (most representative) sample, not vote order
+    # 3-way split → falls back to the middle (55 %) sample, not vote order
     assert _detect_language(FakeModel(["en", "hi", "ta"]), long_audio) == "hi"
 
-    # audio no longer than one window is never split
+    # audio no longer than one window (≤30 s) is never split
     short_audio = np.zeros(10 * SAMPLE_RATE, dtype="float32")
     m = FakeModel(["en"])
     assert _detect_language(m, short_audio) == "en"

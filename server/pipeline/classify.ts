@@ -73,7 +73,9 @@ export function classify(sig: Signals): Classification {
     }
     // speakerCount 0 with faces on screen means diarization produced no labels,
     // not that nobody spoke. Trust CV, but say so and stay under 0.6.
-    return { type: "multi-speaker", confidence: 0.55, reason: `${people} concurrent faces, no speaker labels available` };
+    // Phase 31: distinguish "diarization unavailable" (permanent, route around it)
+    // from "genuinely ambiguous" (transient, worth deferring to).
+    return { type: "multi-speaker", confidence: 0.55, reason: `${people} concurrent faces, no speaker labels available — diarization unavailable` };
   }
 
   return {

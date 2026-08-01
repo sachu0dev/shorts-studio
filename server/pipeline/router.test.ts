@@ -37,16 +37,36 @@ test("each branch of the rule table returns the documented modes", () => {
   }
 });
 
-test("low classifier confidence forces the conservative list from every type", () => {
-  const types: CompositionType[] = ["talking-head", "multi-speaker", "screen-rec", "b-roll"];
+test("low classifier confidence on a single-face clip still returns static-center", () => {
+  // Solo talking-head with low confidence — nothing to group, static is correct.
+  const types: CompositionType[] = ["talking-head", "screen-rec", "b-roll"];
   for (const type of types) {
-    const r = route(sig({ ...twoShot, subjectMotion: 0.9, overlapRatio: 0.9 }), type, 0.55);
+    const r = route(sig({ medianConcurrentFaces: 1, subjectMotion: 0.9 }), type, 0.55);
     assert.deepEqual(r.modes, ["static-center", "blurred-fill"], type);
     assert.match(r.reason, /confidence/);
   }
+  // zero faces — also static, nothing to group
+  const r0 = route(sig({ medianConcurrentFaces: 0 }), "b-roll", 0.55);
+  assert.deepEqual(r0.modes, ["static-center", "blurred-fill"]);
   // and 0.6 itself is not "low"
   assert.notDeepEqual(route(sig({ subjectMotion: 0.09 }), "talking-head", ROUTE_THRESHOLDS.confidence).modes,
     ["static-center", "blurred-fill"]);
+});
+
+test("low classifier confidence with 2+ faces returns group-crop, not static-center (phase 31)", () => {
+  // The corpus bug: 8-person panel, confidence 0.55 (diarization gated) → was
+  // static-center (retains 42.4% of faces). Must now be group-crop.
+  const types: CompositionType[] = ["talking-head", "multi-speaker", "screen-rec", "b-roll"];
+  for (const type of types) {
+    const r = route(sig({ ...twoShot, subjectMotion: 0.9, overlapRatio: 0.9 }), type, 0.55);
+    assert.equal(r.modes[0], "group-crop", `${type}: expected group-crop, got ${r.modes[0]}`);
+    assert.notEqual(r.modes[0], "static-center", `${type}: static-center must not be the first mode`);
+    assert.match(r.reason, /confidence/);
+  }
+  // 8 faces specifically: the corpus defect case
+  const panel8 = route(sig({ medianConcurrentFaces: 8, distinctFaceTracks: 8 }), "multi-speaker", 0.55);
+  assert.equal(panel8.modes[0], "group-crop");
+  assert.notEqual(panel8.modes[0], "static-center");
 });
 
 test("split-screen is never returned when fewer than 2 faces are tracked", () => {
@@ -358,4 +378,136 @@ test("frameAspect is buildComposition's real output, not just the unit-level fun
   const c = buildComposition("clip1", 10, wide, "calm", () => {});
   assert.equal(c.layoutTimeline[0].frameAspect, "16:9");
   assert.deepEqual(c.canvas, { w: 1080, h: 1920 });
+});
+
+// ── phase 31: panel framing ─────────────────────────────────────────────────
+
+import { PANEL } from "./router.js";
+
+// Gate 1 from the spec: the corpus defect case.
+test("8 faces at confidence 0.55 does NOT route to static-center (the corpus defect)", () => {
+  const r = route(
+    sig({ medianConcurrentFaces: 8, distinctFaceTracks: 8 }),
+    "multi-speaker", 0.55
+  );
+  assert.notEqual(r.modes[0], "static-center", "8-person panel must never lead with static-center");
+  assert.equal(r.modes[0], "group-crop");
+  assert.match(r.reason, /group/);
+});
+
+// Gate 2: brief reply inside a panel does NOT trigger camera-switch.
+test("3+ faces, speaker held < PANEL.monologueSeconds → group-crop stays, no switch", () => {
+  // Panel of 4: track 4 talks for 3s (well below the 6s monologue threshold),
+  // track 7 talks the rest.  minHold is effectiveMinHold = PANEL.monologueSeconds
+  // so a 3s turn must be suppressed.
+  const panelTracks = [
+    ...twoTracks,
+    { id: 5, firstSeen: 0, lastSeen: 10, samples: [{ t: 0, cx: 0.5, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 }] },
+    { id: 6, firstSeen: 0, lastSeen: 10, samples: [{ t: 0, cx: 0.6, cy: 0.5, w: 0.1, h: 0.2, conf: 0.9 }] },
+  ];
+  const shortSpeaker: AsdArtifact = {
+    schemaVersion: 1, clipId: "clip1", sampleStep: 0.25, scores: {},
+    // Track 4 talks for 3s, track 7 for 4s, track 5 for 3s (all below 6s PANEL.monologueSeconds)
+    activeTrack: [
+      ...Array(12).fill(4),  // 3s — below PANEL.monologueSeconds
+      ...Array(16).fill(7),  // 4s — below PANEL.monologueSeconds
+      ...Array(12).fill(5),  // 3s — below PANEL.monologueSeconds
+    ],
+    speakers: {}, asdSpeakerCount: 4,
+  };
+  const panelAnalysis = analysis({
+    faceTracks: panelTracks,
+    signals: sig({ medianConcurrentFaces: 4, distinctFaceTracks: 4, overlapRatio: 0.05 }),
+    classification: { type: "multi-speaker", confidence: 0.9, reason: "test" },
+  });
+  const c = buildComposition("clip1", 10, panelAnalysis, "calm", () => {}, shortSpeaker);
+  // route() must have returned group-crop first (panel guard)
+  assert.equal(c.allowedModes[0], "group-crop");
+  // The 3s speaker turn must be suppressed — all segments must stay group-crop
+  assert.ok(
+    c.layoutTimeline.every((s) => s.mode !== "camera-switch"),
+    `expected no camera-switch, got ${JSON.stringify(c.layoutTimeline.map((s) => s.mode))}`
+  );
+});
+
+// Gate 3: sustained monologue on a panel DOES earn a camera-switch.
+test("3+ faces, speaker held >= PANEL.monologueSeconds → camera-switch on that track", () => {
+  const n = 40; // 10s at 4Hz
+  const sustainedSpeaker: AsdArtifact = {
+    schemaVersion: 1, clipId: "clip1", sampleStep: 0.25, scores: {},
+    // Track 4 holds the floor for 7s (28 samples) — clears the 6s bar.
+    activeTrack: [
+      ...Array(28).fill(4),  // 7s — above PANEL.monologueSeconds
+      ...Array(12).fill(7),
+    ],
+    speakers: {}, asdSpeakerCount: 3,
+  };
+  const panelOf3 = analysis({
+    faceTracks: twoTracks,
+    signals: sig({ medianConcurrentFaces: 3, distinctFaceTracks: 3, overlapRatio: 0.05 }),
+    classification: { type: "multi-speaker", confidence: 0.9, reason: "test" },
+  });
+  const c = buildComposition("clip1", 10, panelOf3, "calm", () => {}, sustainedSpeaker);
+  assert.equal(c.allowedModes[0], "group-crop", "panel must start with group-crop");
+  assert.equal(c.mode, "camera-switch", "7s monologue must earn camera-switch");
+  // At least one segment must target the sustained speaker (track 4)
+  assert.ok(
+    c.layoutTimeline.some((s) => s.target === 4),
+    `expected a segment targeting track 4, got ${JSON.stringify(c.layoutTimeline)}`
+  );
+});
+
+// Gate 4: panel with no dominant speaker at all → group-crop, nobody cropped out.
+test("3+ faces with no sustained dominant speaker → group-crop first", () => {
+  const r = route(
+    sig({ medianConcurrentFaces: 5, distinctFaceTracks: 5, overlapRatio: 0.1 }),
+    "multi-speaker", 0.9
+  );
+  assert.equal(r.modes[0], "group-crop");
+  assert.ok(r.modes.includes("camera-switch"), "camera-switch must remain as a secondary option");
+  assert.ok(!r.modes.includes("split-screen"), "split-screen is meaningless on 5 people");
+});
+
+// Gate 5: two-person podcast is unaffected — ordinary min-hold, NOT PANEL.monologueSeconds.
+test("2-person turn-taking still uses ordinary minHold, not PANEL.monologueSeconds", () => {
+  // Track 4 talks for 3s — above ordinary calm minHold (2.5s) but below PANEL.monologueSeconds (6s).
+  // Must still produce a camera-switch segment on a 2-person clip.
+  const c = buildComposition("clip1", 10, multi(), "calm", () => {}, turnTaking());
+  assert.equal(c.mode, "camera-switch");
+  // Both targets must appear — the switch happened
+  const targets = c.layoutTimeline.map((s) => s.target);
+  assert.ok(targets.includes(4) && targets.includes(7), `expected both tracks, got ${targets}`);
+});
+
+// Gate 6: solo clip is untouched.
+test("solo clip is unchanged by phase 31 — same mode, same aspect", () => {
+  const c = buildComposition("clip1", 10, analysis({ signals: sig({ subjectMotion: 0.006 }) }), "calm", () => {});
+  assert.equal(c.mode, "static-center");
+  assert.deepEqual(c.cameraPath, [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1 }]);
+});
+
+// Gate 7: ASD absent + several faces → group-crop from route(), never static-center.
+test("ASD absent with 4 concurrent faces routes to group-crop, not static-center", () => {
+  const r = route(
+    sig({ medianConcurrentFaces: 4, distinctFaceTracks: 4, overlapRatio: 0.1 }),
+    "multi-speaker", 0.9
+  );
+  assert.equal(r.modes[0], "group-crop");
+  assert.notEqual(r.modes[0], "static-center");
+  // Without ASD, buildComposition should also land on group-crop (not a switch fallback)
+  const noAsd = analysis({
+    faceTracks: twoTracks,
+    signals: sig({ medianConcurrentFaces: 4, distinctFaceTracks: 4, overlapRatio: 0.1 }),
+    classification: { type: "multi-speaker", confidence: 0.9, reason: "test" },
+  });
+  const c = buildComposition("clip1", 10, noAsd, "calm", () => {});
+  // group-crop is in IMPLEMENTED_MODES and does not need ASD, so it should render directly
+  assert.equal(c.mode, "group-crop");
+  assert.equal(c.fallbackReason, undefined, "group-crop should not need a fallback");
+});
+
+// 1-face low-confidence: static-center still correct (phase 31 must not regress this).
+test("1 face at low confidence still returns static-center", () => {
+  const r = route(sig({ medianConcurrentFaces: 1, distinctFaceTracks: 1 }), "multi-speaker", 0.55);
+  assert.deepEqual(r.modes, ["static-center", "blurred-fill"]);
 });

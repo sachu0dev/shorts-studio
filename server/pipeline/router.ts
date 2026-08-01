@@ -41,6 +41,27 @@ export const ROUTE_THRESHOLDS = {
   confidence: 0.6,
   /** Genuine crosstalk, the thing that earns split-screen over camera-switch. */
   overlapRatio: 0.25,
+  /** Three or more concurrent faces → treat as a panel, not a two-person conversation. */
+  panelFaces: 3,
+};
+
+/**
+ * Panel-specific routing constants (phase 31).
+ *
+ * A panel earns a camera-switch differently than a two-person conversation:
+ * the switch has to be worth losing everyone else's reaction for, which is a
+ * higher bar than "did this person just say something".
+ */
+export const PANEL = {
+  /**
+   * How long one person has to hold the floor, uninterrupted, before a panel
+   * switches to them specifically. Deliberately well above phase 9's ordinary
+   * `minHold` (2.5s calm / 1.5s dynamic) — a two-person switch only has to
+   * beat "was that a real turn or a backchannel"; a panel switch has to beat
+   * "is losing everyone else's reaction worth it", which is a higher bar.
+   * Starting value, moved only when the corpus says so.
+   */
+  monologueSeconds: 6.0,
 };
 
 /** What `render.py` can actually draw today. Everything else falls back. */
@@ -61,7 +82,16 @@ export function route(sig: Signals, type: CompositionType, confidence: number): 
   const T = ROUTE_THRESHOLDS;
 
   if (confidence < T.confidence) {
-    // A generic edit on an ambiguous clip beats a confident wrong one.
+    // Unsure WHAT the clip is, but certain there are several faces in it —
+    // keeping all of them is the conservative answer. Centre-cropping a panel
+    // is a confident, destructive guess wearing a cautious label.
+    // Phase 31: face-aware fallback replaces the blind static-center-for-all.
+    if (sig.medianConcurrentFaces >= 2) {
+      return {
+        modes: ["group-crop", "blurred-fill"],
+        reason: `classifier confidence ${confidence} < ${T.confidence} but ${sig.medianConcurrentFaces} concurrent faces — keeping the group`,
+      };
+    }
     return {
       modes: ["static-center", "blurred-fill"],
       reason: `classifier confidence ${confidence} < ${T.confidence} — routing conservatively`,
@@ -103,6 +133,20 @@ export function route(sig: Signals, type: CompositionType, confidence: number): 
             `(${sig.distinctFaceTracks} tracks) — multi-cam, nothing to place side by side`,
         };
       }
+
+      // Phase 31: panels of 3+ are a different format from two-person conversations.
+      // Split-screen on 8 people is meaningless; camera-switch that chases every
+      // 3-second reply loses the reactions that make a panel interesting.
+      // Default: keep everyone (group-crop). Switch only on a sustained monologue
+      // — enforced by buildComposition passing PANEL.monologueSeconds as minHold.
+      if (sig.medianConcurrentFaces >= T.panelFaces) {
+        return {
+          modes: ["group-crop", "camera-switch"],
+          reason: `panel (${sig.medianConcurrentFaces} concurrent faces) — group-crop default, camera-switch only on sustained monologue (${PANEL.monologueSeconds}s)`,
+        };
+      }
+
+      // Two-person paths below are unchanged (phase 9).
       if (sig.facesFitOneCrop) {
         return { modes: ["group-crop", "fullscreen-follow"], reason: "multi-speaker, faces fit one 9:16 crop" };
       }
@@ -314,20 +358,62 @@ export function buildComposition(
         ])
       : null;
   const asdReady = (m: LayoutMode) => (m === "split-screen" ? !!splitTargets : canSwitch);
-  let mode = routed.modes.find(
-    (m) => IMPLEMENTED_MODES.includes(m) && (!NEEDS_ASD.includes(m) || asdReady(m))
-  );
+
+  // Phase 31: for a panel (group-crop leads), check whether ASD confirms a
+  // sustained monologue before committing to group-crop. If one speaker holds
+  // the floor for >= PANEL.monologueSeconds, camera-switch earns priority over
+  // the default group shot — that is rule 3 from the spec.
+  const isPanelRoute =
+    routed.modes[0] === "group-crop" &&
+    (analysis?.signals.medianConcurrentFaces ?? 0) >= ROUTE_THRESHOLDS.panelFaces;
+  const effectiveMinHold = isPanelRoute ? PANEL.monologueSeconds : preset.minHold;
+
+  const hasSustainedPanelSpeaker = isPanelRoute && canSwitch && asd
+    ? (() => {
+        // Count longest uninterrupted run for any single track in seconds
+        let maxRun = 0;
+        let currRun = 0;
+        let lastId: number | null = null;
+        for (const id of asd.activeTrack) {
+          if (id != null && id === lastId) {
+            currRun++;
+          } else {
+            currRun = id != null ? 1 : 0;
+            lastId = id;
+          }
+          if (currRun > maxRun) maxRun = currRun;
+        }
+        return (maxRun * asd.sampleStep) >= PANEL.monologueSeconds;
+      })()
+    : false;
+
+  let mode = routed.modes.find((m) => {
+    if (!IMPLEMENTED_MODES.includes(m)) return false;
+    if (NEEDS_ASD.includes(m) && !asdReady(m)) return false;
+    // On a panel: skip group-crop if ASD confirms a sustained speaker —
+    // camera-switch (the next mode) should get the chance to render.
+    if (isPanelRoute && m === "group-crop" && hasSustainedPanelSpeaker) return false;
+    return true;
+  });
+
+  const chosenMode = mode;
+  mode ??= track ? "fullscreen-follow" : "static-center";
+
   let fallbackReason: string | undefined;
-  if (mode !== routed.modes[0]) {
+  if (chosenMode !== routed.modes[0]) {
     // Never crash on an unbuilt mode, and never silently pretend it rendered —
     // including when a *later* allowed mode was drawn instead of the best one.
     const first = routed.modes[0];
-    mode ??= track ? "fullscreen-follow" : "static-center";
-    fallbackReason =
-      `${first} ${IMPLEMENTED_MODES.includes(first)
-        ? "needs active-speaker detection, which did not run for this clip"
-        : "is not implemented yet"} — rendering ${mode}`;
-    log(`${clipId}: ⚠️ ${fallbackReason}`);
+    // For panels with a sustained speaker, camera-switch correctly wins over
+    // group-crop — this is intentional and must not log as a fallback warning.
+    const isPanelUpgrade = isPanelRoute && hasSustainedPanelSpeaker && chosenMode === "camera-switch";
+    if (!isPanelUpgrade) {
+      fallbackReason =
+        `${first} ${IMPLEMENTED_MODES.includes(first)
+          ? "needs active-speaker detection, which did not run for this clip"
+          : "is not implemented yet"} — rendering ${mode}`;
+      log(`${clipId}: ⚠️ ${fallbackReason}`);
+    }
   }
 
   const sourceWidth = analysis?.sourceWidth ?? 0;
@@ -350,7 +436,7 @@ export function buildComposition(
     layoutTimeline = tl.segments;
   } else if (mode === "camera-switch" && canSwitch && asd) {
     const tl = buildLayoutTimeline(
-      asd.activeTrack, asd.sampleStep, cuts, duration, mode, track?.id ?? null, preset.minHold
+      asd.activeTrack, asd.sampleStep, cuts, duration, mode, track?.id ?? null, effectiveMinHold
     );
     ({ heldSegments, suppressedSwitches } = tl);
     layoutTimeline = tl.segments;
