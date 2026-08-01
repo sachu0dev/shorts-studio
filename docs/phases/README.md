@@ -16,12 +16,13 @@ These were decided up front and every phase file assumes them:
 | 4 | `compositionType` is **measured**, `contentMode` is **LLM-chosen** | Two fields, one owner each. The LLM can never select a layout that's physically impossible. |
 | 5 | **Router frames, effects decorate** — the templates survive as a styling layer | Phase 6 ported 11 of 12 to OpenCV and dropped `speed-ramp`; phase 12 drives them per-segment. |
 | 6 | **Rights posture is per-job**, mix of owned and third-party | Phase 14 exists as its own feature before upload. |
+| 7 | **Canvas ≠ window.** The published canvas is always 1080×1920; the *framing window* into the source is 9:16 → 16:9 per segment | Phases 29–31 exist. A wide shot is letterboxed into the tall canvas, never shipped as a landscape file — a landscape master is not a Short. |
 
 ## Priority
 
 | Block | What | Phases |
 |---|---|---|
-| **A — CORE** | Paste a YouTube URL in the web UI → a Short good enough to publish | 0–13 |
+| **A — CORE** | Paste a YouTube URL in the web UI → a Short good enough to publish | 0–13, 29–31 |
 | **B — UPLOAD** | That Short reaches your channel | 14–15 |
 | **C — LATER** | Local models, Content Hunt, scripts, SaaS | 16–23 |
 | **D — SELF-IMPROVING** | Record everything, judge it, publish to the right channel, learn from the result | 24–28 |
@@ -39,14 +40,36 @@ Block A runs in order. Two of Block D's phases are pulled forward to sit **early
 in Block A** rather than after Block C:
 
 ```
-   6 … 13   Block A continues            ← 6-9 built
+   6 … 10   Block A continues            ← 6-10 built
+→  29  Content retention signal          measure what a crop throws away
+→  30  Adaptive framing window           let the window be wider than 9:16
+→  31  Panel framing & speaker priority  fix the centre-crop-on-a-panel defect
+   11 … 13  Block A resumes
 →  24  Source catalog + telemetry store  the DB everything else records into
 →  28  Operations dashboard              the surface that makes the later gates answerable
    14 … 23  as planned
    25 … 27  quality gate → multi-channel → performance loop
 ```
 
-Why they moved:
+**Why 29–31 jump the queue.** They fix a reproduced defect in live output, not a
+missing feature. On corpus job `vI57GWdQo5` clip 2 — an eight-person talent-show
+panel — the pipeline renders `static-center`: a fixed dead-centre crop that
+frames whoever sits in the middle and ignores who is speaking. Measured, a 9:16
+window on that clip **retains 42.4% of the face-appearances and discards the
+rest**; 16:9 retains 98.5%.
+
+Two faults compound: the low-confidence fallback is geometric (`static-center`)
+where it should be content-preserving, and the window aspect is hardcoded to the
+canvas aspect so "keep all eight people" is not expressible at all. Everything
+after this point renders through the same framing code, so fixing it later means
+re-cutting whatever shipped in between.
+
+They also make phase 11 cheaper: its largest inherited item is that
+`blurred-fill` is *routed but not built* and needs "`render.py` to decode
+full-width and skip the crop". A full-width window with a filled remainder is
+exactly that, and arrives in phase 30 as a special case of the general mechanism.
+
+Why 24 and 28 moved:
 
 - **24 pays for itself today.** Re-clipping a source currently re-downloads it.
   It also has no dependencies beyond SQLite.
@@ -93,6 +116,9 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [8](phase-08-light-asd.md) | Light-ASD active speaker detection | A | **built** — gates 1/4 need diarization; ASD unblocks routing |
 | [9](phase-09-camera-switch.md) | camera-switch + group-crop | A | **built** — gate 4 restated; group-crop unexercised on real footage |
 | [10](phase-10-split-screen.md) | Split-screen renderer | A | **built** — gates 1/6 unexercised, no corpus footage with confirmed crosstalk |
+| [29](phase-29-content-retention.md) | Content retention signal | A | **next** — measures what a crop discards |
+| [30](phase-30-adaptive-framing.md) | Adaptive framing window (9:16 → 16:9) | A | planned — unblocks `blurred-fill` for phase 11 |
+| [31](phase-31-panel-framing.md) | Panel framing & speaker priority | A | planned — fixes the reproduced centre-crop defect |
 | [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | planned |
 | [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | planned |
 | [13](phase-13-caption-polish.md) | Caption polish + best-frame thumbnail | A | planned |
@@ -111,6 +137,10 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [27](phase-27-performance-loop.md) | Performance ingest + calibration | D | planned |
 
 ## Ordering logic
+
+Framing correctness (29–31) precedes framing *features* (11–13): every later
+phase renders through the same window code, so a clip that ships with half its
+cast cropped out has to be re-cut once the window is fixed.
 
 Editing quality is the critical path, so it is all of Block A. Within it,
 phases 1–3 are the highest value per line in the entire plan: phase 1 stops you
