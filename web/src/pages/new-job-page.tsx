@@ -6,11 +6,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { createJob, getSystemCheck } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { AiProvider } from "@/types";
+import type { AiProvider, TranscriptSource } from "@/types";
 
 const PROVIDERS: { value: AiProvider; label: string; sub?: string }[] = [
   { value: "gemini", label: "Gemini", sub: "Flash 2.0 (Fast)" },
@@ -29,6 +30,7 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
   const [provider, setProvider] = useState<AiProvider>("gemini");
   const [description, setDescription] = useState("");
   const [controversialMode, setControversialMode] = useState(false);
+  const [transcriptSource, setTranscriptSource] = useState<TranscriptSource>("captions");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ollamaCheck, setOllamaCheck] = useState<{ available: boolean; detail: string } | null>(null);
@@ -67,6 +69,7 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
         aiProvider: provider,
         description: description.trim(),
         controversialMode,
+        transcriptSource,
       });
       onCreated(id);
     } catch (e) {
@@ -203,6 +206,36 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
             <Label htmlFor="controversial" className="text-sm font-normal">
               Allow controversial/edgy content (disables the safe-content selection bias)
             </Label>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <Label className="text-sm">Transcript source</Label>
+            <RadioGroup
+              value={transcriptSource}
+              onValueChange={(v) => setTranscriptSource(v as TranscriptSource)}
+              className="gap-2"
+            >
+              <div className="flex items-start gap-2">
+                <RadioGroupItem value="captions" id="src-captions" className="mt-1" />
+                <Label htmlFor="src-captions" className="text-sm font-normal leading-snug">
+                  YouTube captions (English)
+                  <span className="block text-muted-foreground">
+                    Free, instant, no GPU. Best on Hindi/Hinglish speech. Falls back to WhisperX
+                    when a video has no caption track.
+                  </span>
+                </Label>
+              </div>
+              <div className="flex items-start gap-2">
+                <RadioGroupItem value="whisper" id="src-whisper" className="mt-1" />
+                <Label htmlFor="src-whisper" className="text-sm font-normal leading-snug">
+                  WhisperX (local)
+                  <span className="block text-muted-foreground">
+                    Transcribes the audio itself. Adds speaker labels and true per-word timings.
+                    Falls back to captions if it fails.
+                  </span>
+                </Label>
+              </div>
+            </RadioGroup>
           </div>
         </CardContent>
       </Card>

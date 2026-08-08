@@ -1,4 +1,4 @@
-import type { Job, SystemCheckReport, AiProvider } from "@/types";
+import type { Job, SystemCheckReport, AiProvider, TranscriptSource } from "@/types";
 
 export async function listJobs(): Promise<Job[]> {
   const res = await fetch("/api/jobs");
@@ -20,6 +20,7 @@ export interface CreateJobInput {
   aiProvider: AiProvider;
   description: string;
   controversialMode: boolean;
+  transcriptSource: TranscriptSource;
 }
 
 export async function createJob(input: CreateJobInput): Promise<{ id: string }> {
@@ -30,6 +31,7 @@ export async function createJob(input: CreateJobInput): Promise<{ id: string }> 
     fd.append("aiProvider", input.aiProvider);
     fd.append("description", input.description);
     fd.append("controversialMode", String(input.controversialMode));
+    fd.append("transcriptSource", input.transcriptSource);
     fd.append("video", input.file);
     res = await fetch("/api/jobs", { method: "POST", body: fd });
   } else {
@@ -42,6 +44,7 @@ export async function createJob(input: CreateJobInput): Promise<{ id: string }> 
         aiProvider: input.aiProvider,
         description: input.description,
         controversialMode: input.controversialMode,
+        transcriptSource: input.transcriptSource,
       }),
     });
   }

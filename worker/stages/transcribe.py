@@ -20,15 +20,41 @@ from _base import read_json, run_stage, write_json
 
 SAMPLE_RATE = 16000
 
-# Tried in order; each entry is (model, compute_type, batch_size).
+# Tried in order; each entry is (model, compute_type, batch_size, english_only).
 # Recorded in the artifact as `modelTier` so the corpus tells us what 6 GB needs.
+#
+# `english_only` is not a preference — distil-large-v3 is a distillation trained
+# on English data alone. Handed Hindi audio with language="hi" it cannot emit
+# Devanagari, so it silently degrades into a broken machine translation
+# ("I'm six years from regularly gym, I'm doing") at high confidence, which no
+# downstream check catches. Such a model is skipped outright for non-English
+# audio rather than being allowed to produce plausible-looking garbage.
+#
+# Starting batch sizes are measured on the 6141 MiB target rig, not guessed:
+# large-v3 int8_float16 OOMs at batch 8 and fits at 4. Re-measure if the rig
+# changes — this is a calibration knob, not a constant.
 MODEL_LADDER = [
-    ("large-v3", "int8_float16", 8),
-    ("distil-large-v3", "int8_float16", 8),
-    ("medium", "int8", 4),
-    ("small", "int8", 4),
-    ("base", "int8", 4),
+    ("large-v3", "int8_float16", 4, False),
+    ("distil-large-v3", "int8_float16", 8, True),
+    ("medium", "int8", 4, False),
+    ("small", "int8", 4, False),
+    ("base", "int8", 4, False),
 ]
+
+
+def _batch_steps(batch_size: int) -> list[int]:
+    """Halving retry ladder for one model: 8 -> 4 -> 2 -> 1.
+
+    VRAM during transcription is dominated by the batch, not the weights, so a
+    single OOM at the starting batch is no reason to demote to a weaker model —
+    large-v3 at batch 1 beats medium at batch 4 on Hinglish every time.
+    """
+    steps = []
+    b = batch_size
+    while b >= 1:
+        steps.append(b)
+        b //= 2
+    return steps
 
 DEVANAGARI = re.compile(r"[ऀ-ॿ]+")
 
@@ -46,8 +72,21 @@ def _free() -> None:
 
 
 def _is_oom(e: Exception) -> bool:
+    """True when the GPU could not do the work — step down the ladder.
+
+    CTranslate2 does not always surface a clean "out of memory". Once it OOMs
+    mid-encode its CUDA context is unusable and the *next* call fails with
+    `cudaErrorInvalidDevice: invalid device ordinal` instead. Same root cause,
+    same response: drop to a smaller batch or a smaller model.
+    """
     text = f"{type(e).__name__}: {e}".lower()
-    return "out of memory" in text or "cuda error" in text or "cublas" in text
+    return (
+        "out of memory" in text
+        or "cuda error" in text
+        or "cudaerror" in text
+        or "invalid device ordinal" in text
+        or "cublas" in text
+    )
 
 
 def extract_audio(src: Path, dst: Path) -> None:
@@ -73,20 +112,75 @@ def load_audio(path: Path):
     return np.ascontiguousarray(data)
 
 
+# Consonant / vowel classes over ITRANS output, used by the schwa rule below.
+_CONS = r"(?:kh|gh|ch|Ch|jh|Th|Dh|th|dh|ph|bh|sh|Sh|~n|~N|\.D|\.n|[kgcjTDtdpbmyrlvshnqfzGJ])"
+_VOW = r"(?:ai|au|RRi|[AIUeoaiu])"
+
+# ITRANS -> how Hinglish is actually typed. Ordered: longest match first.
+_HINGLISH = [
+    (r"RRi", "ri"), (r"\.D", "r"), (r"\.n", "n"), (r"~n", "n"), (r"~N", "n"),
+    # nasalised long i is written "in", not "een": nahIM -> nahin
+    (r"IM", "in"), (r"UM$", "un"),
+    # word-final long vowels are written short: rahA -> raha, bhAI -> bhai
+    (r"AI$", "ai"), (r"A$", "a"), (r"I$", "i"), (r"U$", "u"),
+    (r"Ch", "chh"), (r"Sh", "sh"), (r"S", "sh"),
+    (r"Th", "th"), (r"Dh", "dh"), (r"T", "t"), (r"D", "d"), (r"N", "n"),
+    (r"A", "aa"), (r"I", "ee"), (r"U", "oo"),
+    (r"M", "n"), (r"H", ""), (r"\.", ""), (r"~", "n"), (r"\^", ""),
+]
+_SCHWA_FINAL = re.compile(rf"(..*{_CONS})a$")
+# Lookahead so matches may overlap — the rule needs the RIGHTMOST schwa, and
+# non-overlapping scanning hands back the leftmost one.
+_SCHWA_INNER = re.compile(rf"(?=({_VOW}{_CONS})a({_CONS}{_VOW}))")
+
+
+def _deschwa(w: str) -> str:
+    """Drop the inherent 'a' the way spoken Hindi does.
+
+    Devanagari writes a schwa after every bare consonant; Hindi does not say
+    most of them. Without this, कर comes out "kara" and इसका "isakA".
+    Word-final first, then inner V C _ C V, right to left.
+    """
+    w = _SCHWA_FINAL.sub(r"\1", w)
+    while True:
+        hits = list(_SCHWA_INNER.finditer(w))
+        if not hits:
+            break
+        m = hits[-1]
+        cut = m.start() + len(m.group(1))
+        nxt = w[:cut] + w[cut + 1:]
+        if nxt == w:
+            break
+        w = nxt
+    return w
+
+
 def romanize(text: str) -> str:
-    """Devanagari -> Latin, leaving Latin runs untouched.
+    """Devanagari -> readable Hinglish, leaving Latin runs untouched.
 
     Transliterating the whole string would mangle the English half of Hinglish,
     so only Devanagari runs are converted.
+
+    ITRANS is case-significant (A = long aa, T = retroflex), so the output must
+    not simply be lowercased — that both destroys the scheme and reads like
+    nothing anyone types. Deschwa first, then map to everyday spellings.
+
+    ponytail: rule-based, so English loanwords written in Devanagari come out
+    phonetic (बेसिकली -> "besikli", not "basically"). Upgrade path if that
+    grates: a loanword lookup, or hand the pair (native, romanized) to the LLM
+    that is already in the pipeline.
     """
     if not DEVANAGARI.search(text):
         return text
     from indic_transliteration import sanscript
 
-    return DEVANAGARI.sub(
-        lambda m: sanscript.transliterate(m.group(0), sanscript.DEVANAGARI, sanscript.ITRANS).lower(),
-        text,
-    )
+    def one(m: re.Match) -> str:
+        out = _deschwa(sanscript.transliterate(m.group(0), sanscript.DEVANAGARI, sanscript.ITRANS))
+        for pat, rep in _HINGLISH:
+            out = re.sub(pat, rep, out)
+        return out.lower()
+
+    return DEVANAGARI.sub(one, text)
 
 
 #  whisperx's own `detect_language()` always reads `audio[:N_SAMPLES]` — the
@@ -158,7 +252,11 @@ def transcribe(audio, device: str):
     # ── Step 1: detect language with the best model we can load ──────────────
     # Walk the ladder just for the probe; stop as soon as one succeeds.
     detected_language: str | None = None
-    for name, compute_type, _batch_size in MODEL_LADDER:
+    for name, compute_type, _batch_size, english_only in MODEL_LADDER:
+        # An English-only model's language probe can only ever answer "en", so
+        # it is not evidence about anything. Never let one lock the language.
+        if english_only:
+            continue
         try:
             print(f"[transcribe] probing language with {name} ({compute_type})", flush=True)
             probe_model = whisperx.load_model(name, device, compute_type=compute_type)
@@ -196,21 +294,38 @@ def transcribe(audio, device: str):
 
     # ── Step 2: transcribe with the best model that can handle the full audio ─
     last = None
-    for name, compute_type, batch_size in MODEL_LADDER:
-        try:
-            print(f"[transcribe] loading {name} ({compute_type})", flush=True)
-            model = whisperx.load_model(name, device, compute_type=compute_type)
-            # Reuse the language we already measured — do NOT re-probe here.
-            result = model.transcribe(audio, batch_size=batch_size, language=detected_language)
-            del model
-            _free()
-            return result, f"{name}/{compute_type}"
-        except Exception as e:  # noqa: BLE001 - want the ladder to survive any load failure
-            last = e
-            _free()
-            if not _is_oom(e):
-                raise
-            print(f"[transcribe] {name} did not fit ({e}); trying next tier", flush=True)
+    for name, compute_type, batch_size, english_only in MODEL_LADDER:
+        if english_only and detected_language != "en":
+            print(
+                f"[transcribe] skipping {name} — English-only model, audio is "
+                f"'{detected_language}'",
+                flush=True,
+            )
+            continue
+        # Shrink the batch before giving up on this model. The model is RELOADED
+        # for every attempt on purpose: after a CTranslate2 OOM the loaded
+        # model's CUDA context is dead, and calling transcribe() on it again
+        # fails with `invalid device ordinal` no matter how small the batch is.
+        # A fresh load recovers; reusing the object does not.
+        for batch in _batch_steps(batch_size):
+            model = None
+            try:
+                print(f"[transcribe] loading {name} ({compute_type}) at batch_size={batch}", flush=True)
+                model = whisperx.load_model(name, device, compute_type=compute_type)
+                # Reuse the language we already measured — do NOT re-probe here.
+                result = model.transcribe(audio, batch_size=batch, language=detected_language)
+                del model
+                _free()
+                return result, f"{name}/{compute_type}/b{batch}"
+            except Exception as e:  # noqa: BLE001 - want the ladder to survive any failure
+                last = e
+                del model
+                _free()
+                if not _is_oom(e):
+                    raise
+                print(f"[transcribe] {name} did not fit at batch_size={batch} ({e}); shrinking", flush=True)
+
+        print(f"[transcribe] {name} did not fit even at batch_size=1; trying next tier", flush=True)
 
     # ── Step 3: CPU fallback if GPU ladder completely failed ──────────────────
     print("[transcribe] GPU ladder exhausted; attempting CPU transcription fallback", flush=True)
@@ -369,6 +484,37 @@ def _self_test() -> None:
     m = FakeModel(["en"])
     assert _detect_language(m, short_audio) == "en"
     assert m.calls == 1
+
+    # batch retry halves down to 1 and never yields 0 (an infinite/empty batch)
+    assert _batch_steps(8) == [8, 4, 2, 1]
+    assert _batch_steps(4) == [4, 2, 1]
+    assert _batch_steps(1) == [1]
+
+    # Romanization must read like typed Hinglish, not like a scholarly scheme.
+    # Every one of these came out wrong under the old lowercase-ITRANS path.
+    assert romanize("मैं") == "main"
+    assert romanize("नहीं") == "nahin"
+    assert romanize("कर") == "kar"        # schwa deleted, not "kara"
+    assert romanize("इसका") == "iska"     # inner schwa deleted, not "isaka"
+    assert romanize("और") == "aur"
+    assert romanize("रहा") == "raha"      # final long vowel written short
+    assert romanize("लड़की") == "larki"
+    assert romanize("भाई") == "bhai"
+    # Latin runs pass through untouched — this is the point of doing it per-run.
+    assert romanize("gym जा रहा हूं") == "gym ja raha hun"
+    assert romanize("no Devanagari here") == "no Devanagari here"
+
+    # CTranslate2's post-OOM symptom must count as "step down the ladder",
+    # not as a hard failure — this exact string killed a real run.
+    assert _is_oom(RuntimeError("parallel_for failed: cudaErrorInvalidDevice: invalid device ordinal"))
+    assert _is_oom(RuntimeError("CUDA failed with error out of memory"))
+    assert not _is_oom(FileNotFoundError("model weights missing"))
+
+    # Non-English audio must still have a full ladder after every English-only
+    # tier is skipped — otherwise Hinglish falls off the end into a hard failure.
+    multilingual = [t for t in MODEL_LADDER if not t[3]]
+    assert len(multilingual) >= 3, "non-English audio needs real fallbacks"
+    assert multilingual[0][0] == "large-v3", "strongest multilingual model goes first"
 
     print("[transcribe] self-test ok")
 

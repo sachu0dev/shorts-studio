@@ -9,10 +9,11 @@ import { mkdirSync, renameSync, existsSync } from "node:fs";
 import { uploadMiddleware } from "./upload.js";
 import {
   createJob, getJob, listJobs, progress, publicView, saveJob, loadJobs, hydrateJobFromDisk,
-  type Job, type AiProvider, type ClipPlan, type CompilationPlan,
+  type Job, type AiProvider, type ClipPlan, type CompilationPlan, type TranscriptSource,
 } from "./jobs.js";
 import { downloadVideo, ensureDir } from "./pipeline/download.js";
 import { transcribeWithWhisperX, wordsToSegments, type TranscriptArtifact, type TranscriptWord } from "./pipeline/transcribe.js";
+import { fetchYoutubeCaptions } from "./pipeline/youtubeCaptions.js";
 import { researchTrends, planClips, planCompilations } from "./pipeline/analyze.js";
 import { renderClip, renderThumbnail, getDuration, concatClips } from "./pipeline/edit.js";
 import { wordsForClip } from "./pipeline/captions.js";
@@ -66,13 +67,17 @@ app.post("/api/jobs", uploadMiddleware(STORAGE), (req: any, res) => {
   const aiProvider  = (req.body.aiProvider as AiProvider) || "anthropic";
   const description = (req.body.description as string || "").slice(0, 4000); // guard length
   const controversialMode = req.body.controversialMode === "true" || req.body.controversialMode === true;
+  // Default: the platform's English caption track. It beats what a 6 GB card can
+  // run locally on code-switched speech, and needs no GPU at all.
+  const transcriptSource: TranscriptSource =
+    req.body.transcriptSource === "whisper" ? "whisper" : "captions";
 
   if (!url && !filePath) return res.status(400).json({ error: "Provide a video URL or upload a file" });
 
   const missing = missingKey(aiProvider);
   if (missing) return res.status(400).json({ error: `${missing} missing in .env — required for ${aiProvider}` });
 
-  const job = createJob({ url, filePath, clipCount, aiProvider, description, controversialMode });
+  const job = createJob({ url, filePath, clipCount, aiProvider, description, controversialMode, transcriptSource });
   start(job);
   res.json({ id: job.id });
 });
@@ -430,18 +435,44 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
   job.title = ingest.title;
   progress(job, "Video ready", `Duration: ${Math.round(ingest.duration)}s`);
 
-  // 2. transcript — WhisperX always; there is no subtitle path
-  progress(job, "Transcribing (WhisperX)");
+  // 2. transcript — two sources, either one backing the other up.
+  const preferCaptions = job.transcriptSource !== "whisper";
+  progress(job, preferCaptions ? "Fetching captions" : "Transcribing (WhisperX)");
   const transcribeStage: Stage<void, TranscriptArtifact> = {
     name: "transcribe",
     output: "transcript.json",
     schemaVersion: 1,
     async run() {
-      await transcribeWithWhisperX(jobDir, log);
-      // the Python stage writes transcript.json itself; read it back as the artifact
-      const written = await store.readJson<TranscriptArtifact>(job.id, "transcript.json");
-      if (!written) throw new Error("WhisperX finished but wrote no transcript.json");
-      return written;
+      const viaWhisper = async () => {
+        await transcribeWithWhisperX(jobDir, log);
+        // the Python stage writes transcript.json itself; read it back as the artifact
+        const written = await store.readJson<TranscriptArtifact>(job.id, "transcript.json");
+        if (!written) throw new Error("WhisperX finished but wrote no transcript.json");
+        return written;
+      };
+      // Captions only exist for a URL job — an uploaded file has no platform track.
+      const viaCaptions = async () =>
+        job.url ? fetchYoutubeCaptions(job.url, jobDir, "en", log) : null;
+
+      if (preferCaptions) {
+        const captions = await viaCaptions();
+        if (captions) {
+          log(`using YouTube captions — ${captions.words.length} words, no GPU needed`);
+          return captions;
+        }
+        log("no usable caption track — falling back to WhisperX");
+        progress(job, "Transcribing (WhisperX)");
+        return viaWhisper();
+      }
+
+      try {
+        return await viaWhisper();
+      } catch (e) {
+        log(`⚠️ WhisperX failed (${(e as Error).message}) — trying YouTube captions`);
+        const captions = await viaCaptions();
+        if (!captions) throw e;
+        return captions;
+      }
     },
   };
   const transcriptArtifact = await runStage(transcribeStage, ctx, undefined);

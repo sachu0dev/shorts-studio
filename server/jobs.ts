@@ -91,6 +91,14 @@ export interface CompilationPlan {
 
 export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" | "openrouter" | "cerebras";
 
+/**
+ * Where the words come from. `captions` = the platform's own English caption
+ * track (free, no VRAM, and already translated); `whisper` = WhisperX on the
+ * audio. Whichever is picked, the other is the fallback — a job never fails
+ * because one source was unavailable.
+ */
+export type TranscriptSource = "captions" | "whisper";
+
 export interface ClipPlan {
   index: number;
   title: string;
@@ -149,6 +157,8 @@ export interface Job {
   aiProvider: AiProvider;
   description: string;      // user-supplied context: trends, memes, instructions
   controversialMode: boolean; // default false — safe clip-selection bias
+  /** Which text to trust first. Either side falls back to the other. */
+  transcriptSource: TranscriptSource;
   status: "queued" | "running" | "done" | "error";
   stage: string;
   log: string[];
@@ -193,6 +203,7 @@ export interface JobRecord extends Artifact {
     aiProvider: AiProvider;
     description: string;
     controversialMode: boolean;
+    transcriptSource?: TranscriptSource;
   };
   stages: StageTiming[];
   title?: string;
@@ -219,6 +230,7 @@ export function toRecord(job: Job): JobRecord {
       aiProvider: job.aiProvider,
       description: job.description,
       controversialMode: job.controversialMode,
+      transcriptSource: job.transcriptSource,
     },
     stages: job.timings,
     title: job.title,
@@ -333,6 +345,7 @@ export function loadJobs(store: Store, storageRoot: string): number {
       aiProvider: rec.input.aiProvider,
       description: rec.input.description,
       controversialMode: rec.input.controversialMode,
+      transcriptSource: rec.input.transcriptSource ?? "captions",
       // a job that was mid-flight when the process died is not still running
       status: rec.status === "running" ? "error" : rec.status,
       stage: rec.stage,
@@ -372,11 +385,13 @@ export function createJob(input: {
   aiProvider: AiProvider;
   description: string;
   controversialMode?: boolean;
+  transcriptSource?: TranscriptSource;
 }): Job {
   const job: Job = {
     id: nanoid(10),
     ...input,
     controversialMode: input.controversialMode ?? false,
+    transcriptSource: input.transcriptSource ?? "captions",
     status: "queued",
     stage: "Queued",
     log: [],

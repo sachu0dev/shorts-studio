@@ -2,6 +2,8 @@
 // importable across the client/server boundary, so this is hand-kept in sync.
 
 export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" | "openrouter" | "cerebras";
+/** Which text the pipeline trusts first; the other is always the fallback. */
+export type TranscriptSource = "captions" | "whisper";
 export type JobStatus = "queued" | "running" | "done" | "error";
 
 export interface ClipPlan {
