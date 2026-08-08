@@ -126,6 +126,8 @@ export interface Job {
   log: string[];
   error?: string;
   videoPath?: string;
+  /** The source video's own title (yt-dlp metadata) — used only to auto-detect a known show. */
+  title?: string;
   transcript?: { start: number; end: number; text: string }[];
   trendBrief?: string;
   plans?: ClipPlan[];

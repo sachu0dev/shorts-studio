@@ -512,6 +512,31 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
     };
   }
 
+  /**
+   * Known shows/franchises get a format-specific extraction guide, auto-attached
+   * from the video's own title — no manual flag needed. Structural guidance only
+   * (what kind of moment to look for), never the show's actual content.
+   */
+  const SHOW_PROFILES: { match: RegExp; guide: string }[] = [
+    {
+      match: /india'?s?\s*got\s*latent|\blatent\b.*\bindia\b/i,
+      guide: `SHOW FORMAT — comedy talent show: a rotating panel of judges watches a series of
+  contestants each perform (stand-up, singing, a stunt, or just talking their way through
+  it), then reacts, roasts, and scores them. Prioritize, in this order: (1) a contestant's
+  performance played through its own natural arc — setup to payoff, not cut mid-bit; (2) a
+  judge's sharpest roast or reaction to what just happened, including the contestant's
+  comeback if there is one; (3) a rating/verdict/elimination moment, especially a surprising
+  or extreme one. Every contestant who appears is a separate potential clip — do not let one
+  early standout crowd out later performers just because they came first in the transcript.`,
+    },
+  ];
+
+  /** First matching show profile's guide, or undefined if the title doesn't match a known show. */
+  export function detectShowProfile(videoTitle: string | undefined): string | undefined {
+    if (!videoTitle) return undefined;
+    return SHOW_PROFILES.find((p) => p.match.test(videoTitle))?.guide;
+  }
+
   /** Build the planClips prompt text. Pure function — no API call — for testability. */
   export function buildPlanPrompt(args: {
     transcript: string;
@@ -536,6 +561,8 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
      * the entire show — each window gets its own proportional range instead.
      */
     autoRangeDuration?: number;
+    /** Format-specific extraction guide from `detectShowProfile`, when the video's title matched a known show. */
+    showGuide?: string;
   }): string {
     const monetizationInstruction = args.controversialMode
       ? `Edgy, opinionated, or politically controversial moments are explicitly permitted — the creator has opted in to controversial content.`
@@ -578,12 +605,14 @@ ${cuts.slice(0, 80).map((c) => c.toFixed(1)).join(", ")}
 `
       : "";
 
+    const showGuideSection = args.showGuide ? `${args.showGuide}\n\n` : "";
+
     return `You are a master short-form video editor for YouTube Shorts and Instagram Reels.
 
 ${windowHeader}LANGUAGE (binding — match the source, do not translate):
 ${languageRule}
 
-CRITICAL EDITING & CLIP SELECTION RULES:
+${showGuideSection}CRITICAL EDITING & CLIP SELECTION RULES:
 1. STRICT NARRATIVE ARC: Every selected clip MUST tell a complete standalone story (Hook at 0s-3s -> Setup -> Main Payoff/Punchline -> Natural Conclusion).
 2. ZERO MID-SENTENCE CUTS: Start and end every clip ONLY at natural sentence boundaries matching the [start s - end s] blocks in the transcript below. NEVER cut off mid-thought or mid-sentence.
 3. HIGH-RETENTION SELECTION: Select high-energy, viral-worthy, funny, surprising, or deeply informative moments. Skip boring small-talk, greetings, or filler transitions.
@@ -724,9 +753,11 @@ No markdown fences, no commentary.`;
     controversialMode: boolean,
     language = "en",
     romanized = false,
-    sceneCuts: number[] = []
+    sceneCuts: number[] = [],
+    videoTitle?: string
   ): Promise<ClipPlan[]> {
     const formatted = formatTranscriptForPlanning(transcript);
+    const showGuide = detectShowProfile(videoTitle);
 
     let creatorBackgroundSection = "";
     const searchQuery = userDescription.trim() || transcript.slice(0, 3).map((s) => s.text).join(" ").slice(0, 100);
@@ -777,6 +808,7 @@ No markdown fences, no commentary.`;
             ? { index: win.windowIndex + 1, total: win.totalWindows, startTime: win.startTime, endTime: win.endTime }
             : undefined,
           autoRangeDuration: clipsPerWindow > 0 ? undefined : windowDuration,
+          showGuide,
         });
 
         console.log(`[planClips] [${provider}] window ${win.windowIndex + 1}/${win.totalWindows}: ${win.startTime.toFixed(0)}s–${win.endTime.toFixed(0)}s (${win.text.length} chars${clipsPerWindow > 0 ? `, asking for ${clipsPerWindow} clips` : ", auto range"})`);
@@ -836,6 +868,7 @@ No markdown fences, no commentary.`;
       language,
       romanized,
       sceneCuts,
+      showGuide,
     });
 
     const rawText = await complete(provider, prompt, 8000);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizePlan, buildPlanPrompt } from "./analyze.js";
+import { sanitizePlan, buildPlanPrompt, detectShowProfile } from "./analyze.js";
 
 test("sanitizePlan clamps clip duration and timestamps", () => {
   const p = sanitizePlan({ index: 0, start: -5, end: 1000, captions: [] } as any, 200);
@@ -46,6 +46,31 @@ test("buildPlanPrompt instructs controversial content is allowed when true", () 
     videoDuration: 100, controversialMode: true,
   });
   assert.match(prompt, /explicitly permitted/i);
+});
+
+test("detectShowProfile recognizes India's Got Latent from the video title", () => {
+  assert.ok(detectShowProfile("INDIA'S GOT LATENT S2 EP4 ft. Karan Aujla, Tanmay Bhat"));
+  assert.ok(detectShowProfile("India's Got Latent Episode 12"));
+});
+
+test("detectShowProfile returns undefined for an unrelated or missing title", () => {
+  assert.equal(detectShowProfile("Some Random Podcast Episode 5"), undefined);
+  assert.equal(detectShowProfile(undefined), undefined);
+  assert.equal(detectShowProfile(""), undefined);
+});
+
+test("buildPlanPrompt includes the show guide when one is detected", () => {
+  const withGuide = buildPlanPrompt({
+    transcript: "t", trendBrief: "b", descriptionSection: "", clipCount: 3,
+    videoDuration: 100, controversialMode: false, showGuide: "SHOW FORMAT — test guide",
+  });
+  assert.match(withGuide, /SHOW FORMAT — test guide/);
+
+  const withoutGuide = buildPlanPrompt({
+    transcript: "t", trendBrief: "b", descriptionSection: "", clipCount: 3,
+    videoDuration: 100, controversialMode: false,
+  });
+  assert.doesNotMatch(withoutGuide, /SHOW FORMAT — test guide/);
 });
 
 test("buildPlanPrompt always requires monetizationFlag in the output schema", () => {

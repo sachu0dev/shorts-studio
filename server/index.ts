@@ -261,7 +261,7 @@ app.get("/api/jobs/:id/events", (req, res) => {
 // Paths inside artifacts are RELATIVE to the job dir. Absolute paths would not
 // survive the move to object storage in phase 23.
 
-interface IngestArtifact extends Artifact { video: string; duration: number }
+interface IngestArtifact extends Artifact { video: string; duration: number; title: string }
 interface TrendsArtifact extends Artifact { brief: string }
 interface ClipsArtifact extends Artifact { plans: ClipPlan[] }
 // `clip`, `frames`, `decoder` and `encoder` are written by render.py; Node adds
@@ -296,8 +296,11 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
     schemaVersion: 1,
     async run() {
       let videoPath: string;
+      let title = "";
       if (job.url) {
-        videoPath = (await downloadVideo(job.url, jobDir, log)).videoPath;
+        const dl = await downloadVideo(job.url, jobDir, log);
+        videoPath = dl.videoPath;
+        title = dl.title;
       } else {
         videoPath = path.join(jobDir, "source.mp4");
         if (!existsSync(videoPath)) {
@@ -308,12 +311,13 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
           }
         }
       }
-      return { schemaVersion: 1, video: rel(videoPath), duration: await getDuration(videoPath) };
+      return { schemaVersion: 1, video: rel(videoPath), duration: await getDuration(videoPath), title };
     },
   };
   const ingest = await runStage(ingestStage, ctx, undefined);
   const videoPath = abs(ingest.video);
   job.videoPath = videoPath;
+  job.title = ingest.title;
   progress(job, "Video ready", `Duration: ${Math.round(ingest.duration)}s`);
 
   // 2. transcript — WhisperX always; there is no subtitle path
@@ -399,7 +403,8 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
           job.controversialMode,
         transcriptArtifact.language,
         transcriptArtifact.romanized,
-        scenes?.cuts ?? []
+        scenes?.cuts ?? [],
+        job.title
       );
       // Snap here so clips.json is the aligned record — nothing downstream has
       // to know boundaries were ever approximate.
