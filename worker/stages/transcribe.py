@@ -26,6 +26,8 @@ MODEL_LADDER = [
     ("large-v3", "int8_float16", 8),
     ("distil-large-v3", "int8_float16", 8),
     ("medium", "int8", 4),
+    ("small", "int8", 4),
+    ("base", "int8", 4),
 ]
 
 DEVANAGARI = re.compile(r"[ऀ-ॿ]+")
@@ -173,9 +175,24 @@ def transcribe(audio, device: str):
             # Non-OOM during probe — re-raise immediately, something is wrong.
             raise
 
+    if detected_language is None and device == "cuda":
+        print("[transcribe] GPU VRAM full for all tiers; trying CPU for language probe", flush=True)
+        for name in ["medium", "small", "base"]:
+            try:
+                print(f"[transcribe] probing language on CPU with {name}", flush=True)
+                probe_model = whisperx.load_model(name, "cpu", compute_type="int8")
+                detected_language = _detect_language(probe_model, audio)
+                del probe_model
+                _free()
+                print(f"[transcribe] language locked to '{detected_language}' (from {name} on CPU)", flush=True)
+                device = "cpu"
+                break
+            except Exception as cpu_err:  # noqa: BLE001
+                _free()
+                print(f"[transcribe] CPU probe with {name} failed: {cpu_err}", flush=True)
+
     if detected_language is None:
-        # Every model OOM'd even for the probe — nothing left to try.
-        raise RuntimeError("no model fit in VRAM even for language detection")
+        raise RuntimeError("no model fit in VRAM or CPU even for language detection")
 
     # ── Step 2: transcribe with the best model that can handle the full audio ─
     last = None
@@ -194,7 +211,22 @@ def transcribe(audio, device: str):
             if not _is_oom(e):
                 raise
             print(f"[transcribe] {name} did not fit ({e}); trying next tier", flush=True)
-    raise RuntimeError(f"no model in the ladder fit in VRAM; last error: {last}")
+
+    # ── Step 3: CPU fallback if GPU ladder completely failed ──────────────────
+    print("[transcribe] GPU ladder exhausted; attempting CPU transcription fallback", flush=True)
+    for name in ["medium", "small", "base"]:
+        try:
+            print(f"[transcribe] loading {name} on CPU", flush=True)
+            model = whisperx.load_model(name, "cpu", compute_type="int8")
+            result = model.transcribe(audio, batch_size=4, language=detected_language)
+            del model
+            _free()
+            return result, f"{name}/cpu-int8"
+        except Exception as cpu_e:  # noqa: BLE001
+            _free()
+            print(f"[transcribe] CPU fallback {name} failed: {cpu_e}", flush=True)
+
+    raise RuntimeError(f"no model fit in VRAM or CPU; last error: {last}")
 
 
 def diarize(audio, aligned: dict, device: str) -> tuple:

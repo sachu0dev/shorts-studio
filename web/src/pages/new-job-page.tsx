@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,14 +8,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { createJob } from "@/lib/api";
+import { createJob, getSystemCheck } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { AiProvider } from "@/types";
 
-const PROVIDERS: { value: AiProvider; label: string }[] = [
-  { value: "anthropic", label: "Claude" },
-  { value: "openai", label: "GPT-4o" },
-  { value: "gemini", label: "Gemini" },
+const PROVIDERS: { value: AiProvider; label: string; sub?: string }[] = [
+  { value: "gemini", label: "Gemini", sub: "Flash 2.0 (Fast)" },
+  { value: "groq", label: "Groq", sub: "Llama 3.3 70B (Free)" },
+  { value: "openrouter", label: "OpenRouter", sub: "Gemma 4 26B (Free)" },
+  { value: "cerebras", label: "Cerebras", sub: "70B Ultra Fast" },
+  { value: "anthropic", label: "Claude", sub: "Sonnet 4.6" },
+  { value: "openai", label: "GPT-4o", sub: "OpenAI" },
+  { value: "ollama", label: "Ollama", sub: "Qwen 3B (Local)" },
 ];
 
 export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
@@ -27,6 +31,26 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
   const [controversialMode, setControversialMode] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ollamaCheck, setOllamaCheck] = useState<{ available: boolean; detail: string } | null>(null);
+
+  useEffect(() => {
+    getSystemCheck()
+      .then((report) => {
+        const res = report.results.find((r) => r.name.toLowerCase().includes("ollama"));
+        if (res) {
+          setOllamaCheck({
+            available: res.status === "ok",
+            detail: res.detail,
+          });
+        }
+      })
+      .catch(() => {
+        setOllamaCheck({
+          available: false,
+          detail: "Could not run system check",
+        });
+      });
+  }, []);
 
   async function submit() {
     if (!url.trim() && !file) {
@@ -112,25 +136,49 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">AI provider</CardTitle>
+          <CardDescription>Select cloud or local models for clip selection and scripting.</CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="flex gap-2">
-            {PROVIDERS.map((p) => (
-              <button
-                key={p.value}
-                type="button"
-                onClick={() => setProvider(p.value)}
-                className={cn(
-                  "flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors",
-                  provider === p.value
-                    ? "border-brand bg-brand/10 text-brand"
-                    : "border-input text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                )}
-              >
-                {p.label}
-              </button>
-            ))}
+        <CardContent className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {PROVIDERS.map((p) => {
+              const isOllama = p.value === "ollama";
+              const isOllamaDisabled = isOllama && ollamaCheck !== null && !ollamaCheck.available;
+              return (
+                <button
+                  key={p.value}
+                  type="button"
+                  disabled={isOllamaDisabled}
+                  onClick={() => setProvider(p.value)}
+                  className={cn(
+                    "flex flex-col items-center justify-center rounded-md border p-2.5 text-center transition-colors",
+                    provider === p.value
+                      ? "border-brand bg-brand/10 text-brand font-medium"
+                      : "border-input text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                    isOllamaDisabled && "opacity-40 cursor-not-allowed bg-muted/10"
+                  )}
+                >
+                  <div className="flex items-center justify-center gap-1.5 text-sm font-medium">
+                    <span>{p.label}</span>
+                    {isOllama && (
+                      <span
+                        className={cn(
+                          "size-1.5 rounded-full",
+                          ollamaCheck?.available ? "bg-emerald-500" : "bg-muted-foreground/40"
+                        )}
+                      />
+                    )}
+                  </div>
+                  {p.sub && <span className="text-[10px] text-muted-foreground/80 mt-0.5">{p.sub}</span>}
+                </button>
+              );
+            })}
           </div>
+
+          {ollamaCheck && !ollamaCheck.available && (
+            <p className="text-[11px] text-muted-foreground/70">
+              Ollama offline · Run <code className="font-mono text-muted-foreground">ollama serve && ollama pull qwen2.5:3b</code> to enable local AI.
+            </p>
+          )}
         </CardContent>
       </Card>
 

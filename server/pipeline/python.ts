@@ -24,11 +24,20 @@ export async function runPythonStage(
     onLine(l);
   };
 
+  // Emit a heartbeat every 15s so the UI shows the stage is still alive
+  // during long silent Python runs (e.g. scene detection on 50min videos).
+  const start = Date.now();
+  const heartbeat = setInterval(() => {
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    onLine(`⏳ ${name} still running (${elapsed}s elapsed)…`);
+  }, 15_000);
+
   try {
     await run(python, [script, "--job", jobDir, ...extraArgs], capture);
   } catch (e: any) {
-    // A bare "exited with code 1" is useless three phases from now.
     const detail = tail.length ? `\n  ${tail.join("\n  ")}` : "";
     throw new Error(`python stage "${name}" failed (${python}): ${e?.message || e}${detail}`);
+  } finally {
+    clearInterval(heartbeat);
   }
 }

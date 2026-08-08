@@ -50,11 +50,47 @@ export async function createJob(input: CreateJobInput): Promise<{ id: string }> 
   return data;
 }
 
-export async function resumeJob(id: string): Promise<void> {
-  const res = await fetch(`/api/jobs/${id}/resume`, { method: "POST" });
+export async function resumeJob(id: string, aiProvider?: AiProvider): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ aiProvider }),
+  });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `resume failed: ${res.status}`);
+  }
+}
+
+export async function retryFromStage(id: string, stageName: string, aiProvider?: AiProvider): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}/retry-from/${stageName}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ aiProvider }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `retry-from failed: ${res.status}`);
+  }
+}
+
+export async function updateJobProvider(id: string, aiProvider: AiProvider): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ aiProvider }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `update provider failed: ${res.status}`);
+  }
+}
+
+export async function stopJob(id: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}/stop`, { method: "POST" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `stop failed: ${res.status}`);
   }
 }
 

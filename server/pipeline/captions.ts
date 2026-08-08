@@ -35,9 +35,45 @@ function norm(word: string): string {
  * clip-relative. The LLM no longer supplies timings — only which words to
  * emphasize — so its **punch** marks are matched onto the aligned words.
  *
- * This replaces the old even-split interpolation, which gave every word in a
- * caption group the same duration and was the visible caption desync.
  */
+export interface PhraseGroup {
+  words: TimedWord[];
+  start: number;
+  end: number;
+}
+
+/**
+ * Groups 1-word aligned tokens into readable 3-4 word phrase cards.
+ * Breaks on punctuation (. ! ? ,), pauses (> 0.4s), or reaching 4 words.
+ */
+export function groupWordsIntoPhrases(words: TimedWord[], maxWords = 4): PhraseGroup[] {
+  const groups: PhraseGroup[] = [];
+  let current: TimedWord[] = [];
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    current.push(w);
+
+    const prev = current[current.length - 2];
+    const pause = prev ? w.start - prev.end > 0.4 : false;
+    const punct = /[.!?,]$/.test(w.word);
+    const full = current.length >= maxWords;
+
+    if (pause || punct || full || i === words.length - 1) {
+      const gStart = current[0].start;
+      let gEnd = current[current.length - 1].end;
+      const nextWord = words[i + 1];
+      if (nextWord && (nextWord.start - gEnd) <= HOLD_THROUGH_GAP) {
+        gEnd = nextWord.start;
+      }
+      groups.push({ words: [...current], start: gStart, end: gEnd });
+      current = [];
+    }
+  }
+  return groups;
+}
+
+/** Real word timings from the transcript, clipped to the plan's window and made clip-relative. */
 export function wordsForClip(
   words: TranscriptWord[],
   plan: { start: number; end: number; captions: { text: string }[] }
@@ -59,10 +95,6 @@ export function wordsForClip(
     out.push({ word: w.w, punch: punches.has(norm(w.w)), start, end });
   }
 
-  // Real speech leaves short silences between words. Ending each caption on the
-  // word's true end makes the text blink out for a frame or two between words,
-  // so hold it until the next word starts. Only the START drives sync, so this
-  // costs no accuracy — and gaps longer than a beat stay as real pauses.
   for (let i = 0; i < out.length - 1; i++) {
     const gap = out[i + 1].start - out[i].end;
     if (gap > 0 && gap <= HOLD_THROUGH_GAP) out[i].end = out[i + 1].start;
@@ -77,10 +109,10 @@ const HOLD_THROUGH_GAP = 0.5;
 export const PALETTES: Record<CaptionPalette, { normal: string; punch: string; outline: string; back: string }> = {
   "gaming-neon":    { normal: "&H00FFFFFF", punch: "&H00FF00D7", outline: "&H00000000", back: "&H96000000" },
   "meme-comic":     { normal: "&H00FFFFFF", punch: "&H000080FF", outline: "&H00000000", back: "&H96000000" },
-  "news-serious":   { normal: "&H00F0F0F0", punch: "&H00E0E0E0", outline: "&H00202020", back: "&HB4000000" },
-  "hype-yellow":    { normal: "&H0000FFFF", punch: "&H000000FF", outline: "&H00000000", back: "&H96000000" },
+  "news-serious":   { normal: "&H00F0F0F0", punch: "&H0000FFFF", outline: "&H00202020", back: "&HB4000000" },
+  "hype-yellow":    { normal: "&H00FFFFFF", punch: "&H0000FFFF", outline: "&H00000000", back: "&H96000000" },
   "pop-white-red":  { normal: "&H00FFFFFF", punch: "&H000000FF", outline: "&H00000000", back: "&H96000000" },
-  "minimal-clean":  { normal: "&H00FFFFFF", punch: "&H00FFFFFF", outline: "&H00000000", back: "&HB4000000" },
+  "minimal-clean":  { normal: "&H00FFFFFF", punch: "&H0000FFFF", outline: "&H00000000", back: "&HB4000000" },
 };
 
 /** Build the ASS override-tag block ({...}) for one word event. */

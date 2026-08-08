@@ -15,6 +15,8 @@ export interface StageCtx {
   timings: StageTiming[];
   /** Called after every timing change so job.json stays current on disk. */
   onTiming?: (t: StageTiming) => void | Promise<void>;
+  /** If aborted, runStage throws immediately before starting any new stage. */
+  signal?: AbortSignal;
 }
 
 export interface Stage<I, O extends Artifact> {
@@ -48,6 +50,11 @@ export async function runStage<I, O extends Artifact>(
   ctx: StageCtx,
   input: I
 ): Promise<O> {
+  // Bail out immediately if the user stopped the job before this stage began.
+  if (ctx.signal?.aborted) {
+    throw new DOMException("Job stopped by user", "AbortError");
+  }
+
   const existing = await ctx.store.readJson<O>(ctx.jobId, stage.output);
   if (existing && existing.schemaVersion === stage.schemaVersion) {
     ctx.log(`[${stage.name}] cached — skipping`);

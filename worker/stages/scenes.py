@@ -30,16 +30,19 @@ _SIL_START = re.compile(r"silence_start:\s*(-?[\d.]+)")
 _SIL_END = re.compile(r"silence_end:\s*(-?[\d.]+)")
 
 
-def detect_cuts(video: Path) -> tuple[list[float], str]:
-    """Returns (cut timestamps, backend used).
-
-    PyAV is tried first because OpenCV cannot decode AV1 — and YouTube serves a
-    lot of AV1. The failure mode that cost an hour: OpenCV reads ZERO frames and
-    PySceneDetect cheerfully reports "0 cuts" instead of raising. So the frame
-    count is checked explicitly; a decoder that read nothing is an error, never
-    an answer.
-    """
+def detect_cuts(video: Path, duration: float = 0) -> tuple[list[float], str, int]:
+    """Returns (cut timestamps, backend used, frame_skip used)."""
     from scenedetect import AdaptiveDetector, SceneManager, open_video
+
+    # Dynamic frame skip: for videos > 30m, skip 4 frames; for > 15m, skip 3; else 2.
+    if duration > 1800:
+        frame_skip = 4
+    elif duration > 900:
+        frame_skip = 3
+    else:
+        frame_skip = 2
+
+    print(f"[scenes] Scanning video for scene cuts (duration={round(duration)}s, frame_skip={frame_skip})...", flush=True)
 
     last_error = None
     for backend in ("pyav", "opencv"):
@@ -48,10 +51,7 @@ def detect_cuts(video: Path) -> tuple[list[float], str]:
             sm = SceneManager()
             sm.auto_downscale = True  # decode is the whole cost; detail is not needed
             sm.add_detector(AdaptiveDetector())
-            # frame_skip=2 halves the wall time and, measured on the corpus,
-            # returns the identical cut list shifted by <=0.1s — far inside the
-            # 1.2s snapping budget it feeds.
-            sm.detect_scenes(v, show_progress=False, frame_skip=FRAME_SKIP)
+            sm.detect_scenes(v, show_progress=False, frame_skip=frame_skip)
 
             frames = v.position.frame_num
             if frames < 2:
@@ -60,8 +60,9 @@ def detect_cuts(video: Path) -> tuple[list[float], str]:
                 continue
 
             scenes = sm.get_scene_list()
-            # scenes are (start, end) pairs; cut points are the starts after the first
-            return [round(s[0].seconds, 3) for s in scenes[1:]], backend
+            cuts = [round(s[0].seconds, 3) for s in scenes[1:]]
+            print(f"[scenes] {backend} detected {len(cuts)} cuts. Scanning audio silences...", flush=True)
+            return cuts, backend, frame_skip
         except Exception as e:  # noqa: BLE001 - try the next backend before giving up
             last_error = f"{backend}: {e}"
             continue
@@ -101,12 +102,12 @@ def main(d: Path) -> dict:
     video = d / ingest["video"]
     duration = float(ingest.get("duration") or 0)
 
-    cuts, backend = detect_cuts(video)
+    cuts, backend, frame_skip = detect_cuts(video, duration)
     silences = detect_silences(video)
 
     minutes = max(duration / 60.0, 1 / 60.0)
     cuts_per_min = len(cuts) / minutes
-    print(f"[scenes] {len(cuts)} cuts ({cuts_per_min:.1f}/min), {len(silences)} silences", flush=True)
+    print(f"[scenes] Complete: {len(cuts)} cuts ({cuts_per_min:.1f}/min), {len(silences)} silences", flush=True)
 
     return {
         "cuts": cuts,
@@ -117,7 +118,7 @@ def main(d: Path) -> dict:
         "fastCut": cuts_per_min > MAX_CUTS_PER_MINUTE,
         "silenceNoiseDb": SILENCE_NOISE_DB,
         "silenceMinDur": SILENCE_MIN_DUR,
-        "frameSkip": FRAME_SKIP,
+        "frameSkip": frame_skip,
     }
 
 

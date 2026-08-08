@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseEmphasis, wordsForClip, buildWordOverrideTags, buildStyleLine, PALETTES } from "./captions.js";
+import { parseEmphasis, wordsForClip, buildWordOverrideTags, buildStyleLine, groupWordsIntoPhrases, PALETTES } from "./captions.js";
 import type { TranscriptWord } from "./transcribe.js";
 
 test("parseEmphasis strips ** markers and flags punch words", () => {
@@ -117,4 +117,18 @@ test("buildWordOverrideTags produces a distinct tag shape per animation", () => 
 test("buildStyleLine embeds font name and size", () => {
   const line = buildStyleLine("minimal-clean", "Inter", 64);
   assert.match(line, /^Style: Cap,Inter,64,/);
+});
+
+test("groupWordsIntoPhrases groups 1-word tokens into 3-4 word phrase cards", () => {
+  const words = [
+    { word: "Karan,", punch: false, start: 0, end: 0.28 },
+    { word: "thank", punch: false, start: 0.28, end: 0.47 },
+    { word: "you", punch: false, start: 0.47, end: 0.86 },
+    { word: "so", punch: false, start: 0.86, end: 0.98 },
+    { word: "much", punch: false, start: 0.98, end: 1.56 },
+  ];
+  const groups = groupWordsIntoPhrases(words, 4);
+  assert.ok(groups.length >= 2);
+  assert.equal(groups[0].words.length, 1); // broke on comma "Karan,"
+  assert.equal(groups[1].words.length, 4); // "thank", "you", "so", "much"
 });

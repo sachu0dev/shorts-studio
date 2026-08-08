@@ -1,3 +1,4 @@
+import { NavLink, useLocation } from "react-router-dom";
 import { Clapperboard, Plus, Activity, Loader2, CheckCircle2, XCircle, Clock } from "lucide-react";
 import {
   Sidebar,
@@ -12,7 +13,6 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import type { Job } from "@/types";
-import type { View } from "@/App";
 import { cn } from "@/lib/utils";
 
 function jobLabel(job: Job): string {
@@ -32,15 +32,9 @@ const STATUS_ICON: Record<Job["status"], React.ReactNode> = {
   error: <XCircle className="size-3.5 text-destructive" />,
 };
 
-export function AppSidebar({
-  jobs,
-  view,
-  onSelect,
-}: {
-  jobs: Job[];
-  view: View;
-  onSelect: (v: View) => void;
-}) {
+export function AppSidebar({ jobs }: { jobs: Job[] }) {
+  const location = useLocation();
+
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
@@ -64,15 +58,19 @@ export function AppSidebar({
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
-                <SidebarMenuButton isActive={view.kind === "new"} onClick={() => onSelect({ kind: "new" })}>
-                  <Plus />
-                  <span>New job</span>
+                <SidebarMenuButton asChild isActive={location.pathname === "/"}>
+                  <NavLink to="/">
+                    <Plus />
+                    <span>New job</span>
+                  </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton isActive={view.kind === "system"} onClick={() => onSelect({ kind: "system" })}>
-                  <Activity />
-                  <span>System check</span>
+                <SidebarMenuButton asChild isActive={location.pathname === "/system"}>
+                  <NavLink to="/system">
+                    <Activity />
+                    <span>System check</span>
+                  </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
@@ -88,20 +86,26 @@ export function AppSidebar({
                   No jobs yet
                 </div>
               )}
-              {jobs.map((job) => (
-                <SidebarMenuItem key={job.id}>
-                  <SidebarMenuButton
-                    isActive={view.kind === "job" && view.id === job.id}
-                    onClick={() => onSelect({ kind: "job", id: job.id })}
-                    tooltip={job.url || job.id}
-                  >
-                    {STATUS_ICON[job.status]}
-                    <span className={cn("truncate", job.status === "error" && "text-destructive")}>
-                      {jobLabel(job)}
-                    </span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
+              {jobs.map((job) => {
+                const jobPath = `/jobs/${job.id}`;
+                const isActive = location.pathname === jobPath;
+                return (
+                  <SidebarMenuItem key={job.id}>
+                    <SidebarMenuButton
+                      asChild
+                      isActive={isActive}
+                      tooltip={job.url || job.id}
+                    >
+                      <NavLink to={jobPath}>
+                        {STATUS_ICON[job.status]}
+                        <span className={cn("truncate", job.status === "error" && "text-destructive")}>
+                          {jobLabel(job)}
+                        </span>
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

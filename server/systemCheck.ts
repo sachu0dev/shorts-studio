@@ -257,6 +257,65 @@ async function checkGeminiKey(): Promise<CheckResult> {
   }
 }
 
+async function checkOllama(): Promise<CheckResult> {
+  const name = "Ollama (Local LLM)";
+  const baseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1";
+  const modelName = process.env.OLLAMA_MODEL || "qwen2.5:3b";
+
+  try {
+    const { default: OpenAI } = await import("openai");
+    const client = new OpenAI({ baseURL: baseUrl, apiKey: "ollama" });
+    const modelsResponse = await client.models.list();
+    const models = modelsResponse.data || [];
+
+    const baseModel = modelName.split(":")[0];
+    const hasModel = models.some(
+      (m: any) =>
+        m.id === modelName ||
+        m.id.startsWith(`${baseModel}:`) ||
+        m.id === baseModel
+    );
+
+    if (hasModel) {
+      return {
+        name,
+        status: "ok",
+        detail: `Ollama reachable at ${baseUrl} — Model "${modelName}" ready`,
+      };
+    } else {
+      return {
+        name,
+        status: "warn",
+        detail: `Ollama reachable at ${baseUrl} but model "${modelName}" is not pulled. Run: ollama pull ${modelName}`,
+      };
+    }
+  } catch (e: any) {
+    return {
+      name,
+      status: "warn",
+      detail: `Ollama service unreachable at ${baseUrl} — run "ollama serve" and "ollama pull ${modelName}"`,
+    };
+  }
+}
+
+async function checkGroqKey(): Promise<CheckResult> {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) return { name: "Groq API key", status: "warn", detail: "GROQ_API_KEY not set (optional — needed for Groq Llama 3.3 70B)" };
+  return { name: "Groq API key", status: "ok", detail: "Key present" };
+}
+
+async function checkOpenRouterKey(): Promise<CheckResult> {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) return { name: "OpenRouter API key", status: "warn", detail: "OPENROUTER_API_KEY not set (optional — needed for OpenRouter Free tier)" };
+  return { name: "OpenRouter API key", status: "ok", detail: "Key present" };
+}
+
+async function checkCerebrasKey(): Promise<CheckResult> {
+  const key = process.env.CEREBRAS_API_KEY || process.env.CERABRAS_API_KEY;
+  if (!key) return { name: "Cerebras API key", status: "warn", detail: "CEREBRAS_API_KEY not set (optional — needed for Cerebras ultra-fast 70B)" };
+  return { name: "Cerebras API key", status: "ok", detail: "Key present" };
+}
+
 // ─── main export ──────────────────────────────────────────────────────────────
 
 export interface SystemCheckReport {
@@ -280,6 +339,10 @@ export async function runSystemCheck(): Promise<SystemCheckReport> {
     checkAnthropicKey(),
     checkOpenAiKey(),
     checkGeminiKey(),
+    checkGroqKey(),
+    checkOpenRouterKey(),
+    checkCerebrasKey(),
+    checkOllama(),
   ]);
 
   return { overall: rollup(results), checkedAt: new Date().toISOString(), results };

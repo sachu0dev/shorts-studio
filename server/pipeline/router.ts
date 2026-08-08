@@ -66,7 +66,7 @@ export const PANEL = {
 
 /** What `render.py` can actually draw today. Everything else falls back. */
 export const IMPLEMENTED_MODES: LayoutMode[] = [
-  "static-center", "fullscreen-follow", "group-crop", "camera-switch", "split-screen",
+  "static-center", "fullscreen-follow", "blurred-fill", "group-crop", "camera-switch", "split-screen",
 ];
 
 /** Modes that cannot be drawn without knowing who is speaking. */

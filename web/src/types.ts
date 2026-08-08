@@ -1,7 +1,7 @@
 // Mirrors server/jobs.ts, server/systemCheck.ts. No server-side types are
 // importable across the client/server boundary, so this is hand-kept in sync.
 
-export type AiProvider = "anthropic" | "openai" | "gemini";
+export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" | "openrouter" | "cerebras";
 export type JobStatus = "queued" | "running" | "done" | "error";
 
 export interface ClipPlan {
@@ -20,7 +20,7 @@ export interface ClipPlan {
   captionPalette: string;
   captionFont: string;
   layoutTemplate: string;
-  memes: unknown[];
+  memes: { query: string; start: number; end: number; display: string }[];
   monetizationFlag: { risky: boolean; reasons: string[] };
   compositionType?: string;
 }
@@ -47,6 +47,17 @@ export interface JobOutput {
   thumbnail: string;
   plan: ClipPlan;
   edit?: EditSummary;
+  youtubeUrl?: string;
+  youtubeVideoId?: string;
+  uploadedAt?: number;
+}
+
+export interface StageTiming {
+  name: string;
+  status: "done" | "error";
+  ms: number;
+  peakVramMb?: number;
+  cached?: boolean;
 }
 
 export interface Job {
@@ -62,6 +73,7 @@ export interface Job {
   error?: string;
   trendBrief?: string;
   outputs?: JobOutput[];
+  timings?: StageTiming[];
   createdAt: number;
 }
 

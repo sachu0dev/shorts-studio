@@ -5,10 +5,10 @@ if (process.env.HOME && !process.env.PATH?.includes(".local/bin")) {
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, renameSync } from "node:fs";
+import { mkdirSync, renameSync, existsSync } from "node:fs";
 import { uploadMiddleware } from "./upload.js";
 import {
-  createJob, getJob, listJobs, progress, publicView, saveJob, loadJobs,
+  createJob, getJob, listJobs, progress, publicView, saveJob, loadJobs, hydrateJobFromDisk,
   type Job, type AiProvider, type ClipPlan,
 } from "./jobs.js";
 import { downloadVideo, ensureDir } from "./pipeline/download.js";
@@ -27,6 +27,7 @@ import {
 import { summarizeRetention } from "./pipeline/retention.js";
 import { runPythonStage } from "./pipeline/python.js";
 import { runSystemCheck } from "./systemCheck.js";
+import { uploadClipToYouTube } from "./youtube/uploader.js";
 import { LocalStore, type Artifact } from "./artifacts.js";
 import { runStage, type Stage, type StageCtx } from "./stages.js";
 
@@ -77,25 +78,159 @@ app.post("/api/jobs", uploadMiddleware(STORAGE), (req: any, res) => {
 });
 
 /** Re-runs a job against its existing artifacts — completed stages are skipped. */
-app.post("/api/jobs/:id/resume", (req, res) => {
+const VALID_PROVIDERS: AiProvider[] = ["anthropic", "openai", "gemini", "ollama", "groq", "openrouter", "cerebras"];
+
+app.patch("/api/jobs/:id", async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "unknown job" });
+  if (req.body.aiProvider && VALID_PROVIDERS.includes(req.body.aiProvider)) {
+    job.aiProvider = req.body.aiProvider;
+    await saveJob(job, store);
+  }
+  res.json(publicView(job));
+});
+
+app.post("/api/jobs/:id/resume", async (req, res) => {
   const job = getJob(req.params.id);
   if (!job) return res.status(404).json({ error: "unknown job" });
   if (job.status === "running") return res.status(409).json({ error: "already running" });
+  if (req.body?.aiProvider && VALID_PROVIDERS.includes(req.body.aiProvider)) {
+    job.aiProvider = req.body.aiProvider;
+    await saveJob(job, store);
+  }
   job.error = undefined;
   start(job);
-  res.json({ id: job.id, resumed: true });
+  res.json({ id: job.id, resumed: true, aiProvider: job.aiProvider });
 });
 
+/**
+ * Retry a job from a specific stage by deleting that stage's artifact (and all
+ * downstream ones), then resuming. runStage's cache-miss logic re-runs anything
+ * that is missing, so clearing the right files is all this endpoint needs to do.
+ *
+ * Ordered list of stages + their artifact paths inside the job dir.
+ * Everything at or after `stageName` in this list is deleted.
+ */
+const STAGE_ARTIFACTS: { name: string; paths: string[] }[] = [
+  { name: "ingest",     paths: ["ingest.json"] },
+  { name: "transcribe", paths: ["transcript.json"] },
+  { name: "scenes",     paths: ["scenes.json"] },
+  { name: "trends",     paths: ["trends.json"] },
+  { name: "plan",       paths: ["clips.json", "analysis", "asd", "composition", "render", "out"] },
+  { name: "render",     paths: ["render", "out"] },
+];
+
+app.post("/api/jobs/:id/retry-from/:stageName", async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "unknown job" });
+  if (job.status === "running") return res.status(409).json({ error: "already running" });
+
+  const fromIdx = STAGE_ARTIFACTS.findIndex((s) => s.name === req.params.stageName);
+  if (fromIdx === -1) return res.status(400).json({ error: `unknown stage: ${req.params.stageName}` });
+
+  if (req.body?.aiProvider && VALID_PROVIDERS.includes(req.body.aiProvider)) {
+    job.aiProvider = req.body.aiProvider;
+    await saveJob(job, store);
+  }
+
+  // Delete artifacts for this stage and all downstream stages
+  const { promises: fsp } = await import("node:fs");
+  for (const stage of STAGE_ARTIFACTS.slice(fromIdx)) {
+    for (const rel of stage.paths) {
+      const p = store.path(job.id, rel);
+      await fsp.rm(p, { recursive: true, force: true }).catch(() => {});
+    }
+    // Also clear the timing record so the UI reflects the re-run
+    const ti = job.timings.findIndex((t) => t.name === stage.name);
+    if (ti >= 0) job.timings.splice(ti, 1);
+  }
+
+  job.error = undefined;
+  job.plans = undefined;
+  job.outputs = undefined;
+  start(job);
+  res.json({ id: job.id, retryFrom: req.params.stageName, aiProvider: job.aiProvider });
+});
+
+/** AbortControllers for currently-running jobs — lets /stop cancel in-flight work. */
+const runningAborts = new Map<string, AbortController>();
+
 function start(job: Job) {
-  runPipeline(job).catch(async (err) => {
+  const ac = new AbortController();
+  runningAborts.set(job.id, ac);
+  runPipeline(job, ac.signal).catch(async (err) => {
     job.status = "error";
-    job.error = String(err?.message || err);
-    progress(job, "Failed", `ERROR: ${job.error}`);
+    job.error = ac.signal.aborted ? "Stopped by user" : String(err?.message || err);
+    progress(job, "Stopped", `Stopped: ${job.error}`);
     await saveJob(job, store).catch(() => {});
+  }).finally(() => {
+    runningAborts.delete(job.id);
   });
 }
 
-app.get("/api/jobs", (_req, res) => res.json(listJobs().map(publicView)));
+/** Cancels a running job. Completed stages remain cached so it can be resumed. */
+app.post("/api/jobs/:id/stop", (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "unknown job" });
+  const ac = runningAborts.get(req.params.id);
+  if (!ac) return res.status(409).json({ error: "job is not running" });
+  ac.abort();
+  res.json({ id: job.id, stopped: true });
+});
+
+/** Temporary YouTube direct upload endpoint for a rendered clip. */
+app.post("/api/jobs/:id/clips/:index/upload-youtube", async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "unknown job" });
+  hydrateJobFromDisk(job, store);
+
+  const clipIndex = Number(req.params.index);
+  const plan = job.plans?.find((p) => p.index === clipIndex);
+  if (!plan) return res.status(404).json({ error: `clip plan #${clipIndex} not found` });
+
+  const clipId = `clip${clipIndex}`;
+  const videoRelPath = `out/${clipId}.mp4`;
+  const videoAbsPath = path.join(store.jobDir(job.id), videoRelPath);
+
+  if (!existsSync(videoAbsPath)) {
+    return res.status(404).json({ error: `Rendered clip video file not found on disk at ${videoRelPath}` });
+  }
+
+  const result = await uploadClipToYouTube({
+    videoPath: videoAbsPath,
+    title: plan.title,
+    script: plan.script,
+    hashtags: plan.hashtags,
+    privacyStatus: req.body?.privacyStatus || "public",
+  });
+
+  if (result.success && result.videoUrl && result.videoId) {
+    // Persist YouTube URL into job state and disk artifact
+    const renderArt = await store.readJson<any>(job.id, `render/${clipId}.json`);
+    if (renderArt) {
+      renderArt.youtubeUrl = result.videoUrl;
+      renderArt.youtubeVideoId = result.videoId;
+      renderArt.uploadedAt = Date.now();
+      await store.writeJson(job.id, `render/${clipId}.json`, renderArt);
+    }
+    const output = job.outputs?.find((o) => o.plan.index === clipIndex);
+    if (output) {
+      output.youtubeUrl = result.videoUrl;
+      output.youtubeVideoId = result.videoId;
+      output.uploadedAt = Date.now();
+    }
+    await saveJob(job, store).catch(() => {});
+    job.emitter.emit("update", publicView(job));
+  }
+
+  res.json(result);
+});
+
+app.get("/api/jobs", (_req, res) => {
+  const jobsList = listJobs();
+  for (const j of jobsList) hydrateJobFromDisk(j, store);
+  res.json(jobsList.map(publicView));
+});
 
 app.get("/api/system-check", async (_req, res) => {
   try {
@@ -109,6 +244,7 @@ app.get("/api/system-check", async (_req, res) => {
 app.get("/api/jobs/:id/events", (req, res) => {
   const job = getJob(req.params.id);
   if (!job) return res.status(404).end();
+  hydrateJobFromDisk(job, store);
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -135,7 +271,7 @@ interface RenderArtifact extends Artifact {
   frames?: number; decoder?: string; encoder?: string;
 }
 
-async function runPipeline(job: Job) {
+async function runPipeline(job: Job, signal?: AbortSignal) {
   job.status = "running";
   const jobDir = path.join(STORAGE, job.id);
   ensureDir(jobDir);
@@ -149,6 +285,7 @@ async function runPipeline(job: Job) {
     log,
     timings: job.timings,
     onTiming: () => saveJob(job, store),
+    signal,
   };
 
   // 1. acquire video
@@ -163,7 +300,13 @@ async function runPipeline(job: Job) {
         videoPath = (await downloadVideo(job.url, jobDir, log)).videoPath;
       } else {
         videoPath = path.join(jobDir, "source.mp4");
-        renameSync(job.filePath!, videoPath);
+        if (!existsSync(videoPath)) {
+          if (job.filePath && existsSync(job.filePath)) {
+            renameSync(job.filePath, videoPath);
+          } else {
+            throw new Error(`Uploaded video file not found (checked ${job.filePath})`);
+          }
+        }
       }
       return { schemaVersion: 1, video: rel(videoPath), duration: await getDuration(videoPath) };
     },
@@ -301,7 +444,7 @@ async function runPipeline(job: Job) {
         };
         // Classified here, not in Python: it needs the transcript-derived
         // signals, and it has to stay unit-testable without invoking a stage.
-        return { ...cv, signals, classification: classify(signals) };
+        return { ...cv, schemaVersion: 4, signals, classification: classify(signals) };
       },
     };
     try {
@@ -474,6 +617,7 @@ async function runPipeline(job: Job) {
       },
     });
     progress(job, `Clip ${plan.index} done`, `Rendered ${path.basename(out.clip)} — ${out.encoder ?? "?"}, ${out.frames ?? "?"} frames`);
+    await saveJob(job, store).catch(() => {});
   }
 
   job.status = "done";

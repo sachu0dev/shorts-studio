@@ -338,6 +338,7 @@ def main(d: Path) -> dict:
           f"{signals['distinctFaceTracks']} track(s), coverage={signals['faceCoverage']}", flush=True)
 
     return {
+        "schemaVersion": 4,
         "clipId": args.clip_id,
         "start": args.start,
         "end": args.end,

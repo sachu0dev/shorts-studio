@@ -59,7 +59,7 @@ export interface MemeOverlay {
   display: MemeDisplayMode;
 }
 
-export type AiProvider = "anthropic" | "openai" | "gemini";
+export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" | "openrouter" | "cerebras";
 
 export interface ClipPlan {
   index: number;
@@ -127,7 +127,15 @@ export interface Job {
   transcript?: { start: number; end: number; text: string }[];
   trendBrief?: string;
   plans?: ClipPlan[];
-  outputs?: { clip: string; thumbnail: string; plan: ClipPlan; edit?: EditSummary }[];
+  outputs?: {
+    clip: string;
+    thumbnail: string;
+    plan: ClipPlan;
+    edit?: EditSummary;
+    youtubeUrl?: string;
+    youtubeVideoId?: string;
+    uploadedAt?: number;
+  }[];
   emitter: EventEmitter;
   createdAt: number;
   timings: StageTiming[];
@@ -148,6 +156,9 @@ export interface JobRecord extends Artifact {
     controversialMode: boolean;
   };
   stages: StageTiming[];
+  trendBrief?: string;
+  plans?: ClipPlan[];
+  outputs?: Job["outputs"];
 }
 
 export const JOB_SCHEMA_VERSION = 1;
@@ -168,11 +179,83 @@ export function toRecord(job: Job): JobRecord {
       controversialMode: job.controversialMode,
     },
     stages: job.timings,
+    trendBrief: job.trendBrief,
+    plans: job.plans,
+    outputs: job.outputs,
   };
 }
 
 export async function saveJob(job: Job, store: Store): Promise<void> {
   await store.writeJson(job.id, "job.json", toRecord(job));
+  job.emitter.emit("update", publicView(job));
+}
+
+export function hydrateJobFromDisk(job: Job, store: Store) {
+  // 1. Hydrate trendBrief if missing
+  if (!job.trendBrief) {
+    const tb = readJsonSync<{ schemaVersion: number; brief: string }>(store, job.id, "trends.json");
+    if (tb?.brief) job.trendBrief = tb.brief;
+  }
+
+  // 2. Hydrate plans if missing
+  if (!job.plans || job.plans.length === 0) {
+    const cp = readJsonSync<{ schemaVersion: number; plans: ClipPlan[] }>(store, job.id, "clips.json");
+    if (cp?.plans) job.plans = cp.plans;
+  }
+
+  // 3. Hydrate outputs if missing
+  if (!job.outputs || job.outputs.length === 0) {
+    if (job.plans && job.plans.length > 0) {
+      const outputs: NonNullable<Job["outputs"]> = [];
+      for (const plan of job.plans) {
+        const clipId = `clip${plan.index}`;
+        const renderArt = readJsonSync<{
+          schemaVersion: number;
+          clip: string;
+          thumbnail: string;
+          encoder?: string;
+          frames?: number;
+          youtubeUrl?: string;
+          youtubeVideoId?: string;
+          uploadedAt?: number;
+        }>(store, job.id, `render/${clipId}.json`);
+        if (renderArt) {
+          const comp = readJsonSync<any>(store, job.id, `composition/${clipId}.json`);
+          const analysis = readJsonSync<any>(store, job.id, `analysis/${clipId}.json`);
+          outputs.push({
+            clip: `/files/${job.id}/${renderArt.clip}`,
+            thumbnail: `/files/${job.id}/${renderArt.thumbnail}`,
+            plan,
+            youtubeUrl: renderArt.youtubeUrl,
+            youtubeVideoId: renderArt.youtubeVideoId,
+            uploadedAt: renderArt.uploadedAt,
+            edit: comp ? {
+              compositionType: comp.compositionType,
+              mode: comp.mode,
+              allowedModes: comp.allowedModes,
+              routedReason: comp.routedReason,
+              fallbackReason: comp.fallbackReason,
+              preset: comp.preset,
+              cameraKeyframes: comp.cameraPath?.length || 0,
+              heldSegments: comp.heldSegments,
+              suppressedSwitches: comp.suppressedSwitches,
+              encoder: renderArt.encoder,
+              frames: renderArt.frames,
+              retention: analysis?.signals?.retention,
+              narrowestSafe: analysis?.signals?.narrowestSafe,
+            } : undefined,
+          });
+        }
+      }
+      if (outputs.length > 0) {
+        job.outputs = outputs;
+        if (job.status !== "running" && job.status !== "queued") {
+          job.status = "done";
+          job.stage = "All clips ready";
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -198,7 +281,7 @@ export function loadJobs(store: Store, storageRoot: string): number {
     }
     if (!rec || rec.schemaVersion !== JOB_SCHEMA_VERSION) continue;
 
-    jobs.set(id, {
+    const j: Job = {
       id: rec.id,
       url: rec.input.url,
       clipCount: rec.input.clipCount,
@@ -210,10 +293,15 @@ export function loadJobs(store: Store, storageRoot: string): number {
       stage: rec.stage,
       error: rec.status === "running" ? "interrupted — server restarted" : rec.error,
       log: [],
+      trendBrief: rec.trendBrief,
+      plans: rec.plans,
+      outputs: rec.outputs,
       emitter: new EventEmitter(),
       createdAt: rec.createdAt,
       timings: rec.stages || [],
-    });
+    };
+    hydrateJobFromDisk(j, store);
+    jobs.set(id, j);
     loaded++;
   }
   return loaded;

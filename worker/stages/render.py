@@ -393,7 +393,7 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> int:
     if hwaccel:
         dec_cmd += ["-hwaccel", hwaccel]
     dec_cmd += [
-        "-ss", start, "-to", end, "-i", source,
+        "-accurate_seek", "-ss", start, "-to", end, "-i", source,
         "-vf", f"scale={dec_w}:{WORK_H}",
         "-r", str(FPS), "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
     ]
@@ -405,7 +405,7 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> int:
         # already leaves every frame at OUT_W x OUT_H before it is queued.
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{OUT_W}x{OUT_H}", "-r", str(FPS), "-i", "-",
         # Audio comes straight from the source; only the video was rebuilt.
-        "-ss", start, "-to", end, "-i", source,
+        "-accurate_seek", "-ss", start, "-to", end, "-i", source,
     ]
     for m in comp.get("memeInputs", []):
         enc_cmd += ["-i", m]

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { BrowserRouter, Routes, Route, useNavigate, useParams, useLocation } from "react-router-dom";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/app-sidebar";
@@ -9,44 +10,42 @@ import { SystemCheckPage } from "@/pages/system-check-page";
 import { listJobs } from "@/lib/api";
 import type { Job } from "@/types";
 
-export type View = { kind: "new" } | { kind: "system" } | { kind: "job"; id: string };
-
-const TITLES: Record<View["kind"], string> = {
-  new: "New job",
-  system: "System check",
-  job: "Job",
-};
-
-export default function App() {
-  const [view, setView] = useState<View>({ kind: "new" });
+function Layout() {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const navigate = useNavigate();
+  const location = useLocation();
 
-  // The sidebar's job list is a light poll, not SSE — SSE is per-job and only
-  // the open JobPage subscribes to it. Refreshing while a job is selected also
-  // catches its status flipping to done/error for the sidebar icon.
   useEffect(() => {
     let cancelled = false;
     const refresh = () => listJobs().then((j) => !cancelled && setJobs(j)).catch(() => {});
     refresh();
     const id = setInterval(refresh, 4000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  const title = view.kind === "job" ? jobLabel(jobs, view.id) : TITLES[view.kind];
+  const getTitle = () => {
+    if (location.pathname === "/") return "New job";
+    if (location.pathname === "/system") return "System check";
+    if (location.pathname.startsWith("/jobs/")) {
+      const id = location.pathname.replace("/jobs/", "");
+      const job = jobs.find((j) => j.id === id);
+      return job?.url || id || "Job";
+    }
+    return "Shorts Studio";
+  };
 
   return (
     <TooltipProvider delayDuration={200}>
       <SidebarProvider>
-        <AppSidebar jobs={jobs} view={view} onSelect={setView} />
+        <AppSidebar jobs={jobs} />
         <SidebarInset>
-          <SiteHeader title={title} />
+          <SiteHeader title={getTitle()} />
           <div className="flex-1 overflow-auto">
-            {view.kind === "new" && <NewJobPage onCreated={(id) => setView({ kind: "job", id })} />}
-            {view.kind === "system" && <SystemCheckPage />}
-            {view.kind === "job" && <JobPage jobId={view.id} />}
+            <Routes>
+              <Route path="/" element={<NewJobPage onCreated={(id) => navigate(`/jobs/${id}`)} />} />
+              <Route path="/system" element={<SystemCheckPage />} />
+              <Route path="/jobs/:id" element={<JobPageRoute />} />
+            </Routes>
           </div>
         </SidebarInset>
       </SidebarProvider>
@@ -54,7 +53,17 @@ export default function App() {
   );
 }
 
-function jobLabel(jobs: Job[], id: string): string {
-  const job = jobs.find((j) => j.id === id);
-  return job?.url || id;
+function JobPageRoute() {
+  const params = useParams<{ id: string }>();
+  return <JobPage jobId={params.id ?? ""} />;
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/*" element={<Layout />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }

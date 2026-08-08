@@ -2,7 +2,7 @@ import path from "node:path";
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { run, ensureDir } from "./download.js";
 import type { ClipPlan } from "../jobs.js";
-import { buildWordOverrideTags, buildStyleLine, type TimedWord } from "./captions.js";
+import { buildStyleLine, groupWordsIntoPhrases, PALETTES, type TimedWord } from "./captions.js";
 import { buildMemeOverlayFilter } from "./layouts.js";
 import { resolveFont } from "./fonts.js";
 import { fetchMemeAsset } from "./memes.js";
@@ -37,27 +37,43 @@ function esc(t: string) {
   return t.replace(/\\/g, "\\\\").replace(/\{/g, "(").replace(/\}/g, ")").replace(/\n/g, " ");
 }
 
-/** Build an .ass subtitle file for one clip (word-level captions + 2s opening hook). */
+/** Build an .ass subtitle file for one clip (word-level karaoke phrase captions + top opening hook). */
 export function buildAss(plan: ClipPlan, outPath: string, words: TimedWord[] = []) {
   const dur = plan.end - plan.start;
   const events: string[] = [];
   const fontsize = plan.captionPalette === "news-serious" ? 58 : 72;
+  const colors = PALETTES[plan.captionPalette] || PALETTES["hype-yellow"];
 
-  // opening hook with a pop-in scale animation
+  // Opening hook — placed at top center (Alignment 8) so it never collides with bottom captions
   events.push(
-    `Dialogue: 1,${assTime(0)},${assTime(Math.min(2.2, dur))},Hook,,0,0,0,,{\\fad(120,150)\\t(0,180,\\fscx110\\fscy110)\\t(180,320,\\fscx100\\fscy100)}${esc(plan.hook)}`
+    `Dialogue: 1,${assTime(0)},${assTime(Math.min(2.5, dur))},Hook,,0,0,0,,{\\fad(120,150)\\t(0,180,\\fscx110\\fscy110)\\t(180,320,\\fscx100\\fscy100)}${esc(plan.hook)}`
   );
 
-  // Timings come from WhisperX forced alignment — one Dialogue per aligned word.
-  for (const w of words) {
-    const start = Math.max(0, Math.min(w.start, dur));
-    const end = Math.max(start + 0.05, Math.min(w.end, dur));
-    const tags = buildWordOverrideTags(w, plan.captionAnimation, plan.captionPalette);
-    events.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Cap,,0,0,0,,${tags}${esc(w.word)}`);
+  // Timings come from WhisperX forced alignment — 3-4 word phrase cards with active word karaoke highlighting.
+  const groups = groupWordsIntoPhrases(words, 4);
+  for (const group of groups) {
+    for (const activeWord of group.words) {
+      const start = Math.max(0, Math.min(activeWord.start, dur));
+      const end = Math.max(start + 0.05, Math.min(activeWord.end, dur));
+
+      const lineParts: string[] = [];
+      for (const w of group.words) {
+        if (w === activeWord) {
+          const tags = w.punch
+            ? `{\\c${colors.punch}\\t(0,100,\\fscx135\\fscy135)\\t(100,200,\\fscx100\\fscy100)}`
+            : `{\\c${colors.punch}\\fscx115\\fscy115}`;
+          lineParts.push(`${tags}${esc(w.word)}{\\r}`);
+        } else {
+          lineParts.push(`{\\c${colors.normal}}${esc(w.word)}`);
+        }
+      }
+      events.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Cap,,0,0,0,,${lineParts.join(" ")}`);
+    }
   }
 
   const capStyle = buildStyleLine(plan.captionPalette, plan.captionFont, fontsize);
-  const hookStyle = `Style: Hook,${plan.captionFont},${fontsize + 14},&H0000D7FF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,6,3,8,60,60,120,1`;
+  // Alignment 8 (top center), MarginV 180 — clear of bottom captions (Alignment 2, MarginV 260)
+  const hookStyle = `Style: Hook,${plan.captionFont},${fontsize + 14},&H0000D7FF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,6,3,8,60,60,180,1`;
 
   const ass = `[Script Info]
 ScriptType: v4.00+
