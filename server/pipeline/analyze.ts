@@ -288,7 +288,7 @@ export function formatTranscriptForPlanning(transcript: Segment[]): string {
         captionAnimation: { type: "string" as const, enum: ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"] },
         captionPalette: { type: "string" as const, enum: ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"] },
         captionFont: { type: "string" as const },
-        layoutTemplate: { type: "string" as const, enum: ["fullscreen", "blurred-fill", "meme-corner", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout"] },
+        layoutTemplate: { type: "string" as const, enum: ["fullscreen", "blurred-fill", "meme-corner", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout"] },
         memes: { type: "array" as const, items: { type: "object" as const, properties: { start: { type: "number" as const }, end: { type: "number" as const }, query: { type: "string" as const }, display: { type: "string" as const, enum: ["corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split"] } }, required: ["start", "end", "query", "display"] } },
         monetizationFlag: { type: "object" as const, properties: { risky: { type: "boolean" as const }, reasons: { type: "array" as const, items: { type: "string" as const } } }, required: ["risky", "reasons"] },
       },
@@ -448,7 +448,7 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
   const VALID_CONTENT_MODES: ContentMode[] = ["funny", "gaming", "political"];
   const VALID_ANIMATIONS: CaptionAnimation[] = ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"];
   const VALID_PALETTES: CaptionPalette[] = ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"];
-  export const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout"];
+  export const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout"];
   const VALID_MEME_DISPLAYS: MemeDisplayMode[] = ["corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split"];
 
   /**
@@ -480,7 +480,11 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
   export function sanitizePlan(p: Partial<ClipPlan> & { index: number }, videoDuration: number): ClipPlan {
     let start = Math.max(0, p.start ?? 0);
     let end = Math.min(videoDuration, p.end ?? start + 25);
-    if (end - start > 59) end = start + 58;
+    // Raised from a 59s hard cap: a full comedy bit or talent-show performance
+    // routinely needs more room than a single joke does, and YouTube Shorts
+    // itself allows up to 180s — 118s leaves headroom under the prompt's own
+    // stated 20-110s range instead of clamping right at its edge.
+    if (end - start > 120) end = start + 118;
     if (end - start < 15) end = Math.min(videoDuration, start + 25);
     const thumbnailTimestamp = Math.min(Math.max(p.thumbnailTimestamp ?? start, start), end);
 
@@ -593,14 +597,14 @@ FULL VIDEO TRANSCRIPT IN SENTENCE BLOCKS [start s - end s] (video duration ${arg
 ${args.transcript}
 
 Task: ${countInstruction} for YouTube Shorts. Rules:
-- Each clip 20-58 seconds long, starting and ending precisely at sentence boundaries from the transcript blocks.
+- Each clip 20-110 seconds long, starting and ending precisely at sentence boundaries from the transcript blocks. A full comedy bit, performance, or story with a real beginning/middle/end is allowed to run the full length rather than being cut short for time.
 - Clips must not overlap.
 - captions: optional array of key phrase strings with **punch words** wrapped in double asterisks for visual emphasis (e.g. ["this is **insane**"]). Keep captions brief or empty — exact word timings are extracted automatically by Node.
 - contentMode: classify the clip as "funny", "gaming", or "political" based on its content and tone.
 - captionAnimation: pick per clip from "karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split" — whichever suits the clip's energy.
 - captionPalette: pick per clip from "gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean" — match to contentMode (e.g. gaming -> gaming-neon, political -> news-serious).
 - captionFont: pick a bold, high-impact Google Fonts family name appropriate to the palette (e.g. "Anton", "Bebas Neue", "Luckiest Guy", "Archivo Black", "Poppins", "Montserrat").
-- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "shake-on-beat", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout".
+- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout".
 - memes: an array (can be empty) of {start, end, query, display} for moments where a meme/reaction GIF would land well. display is one of "corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split". query is a short search term (e.g. "shocked cat", "mind blown").
 - monetizationFlag: {risky: boolean, reasons: string[]} — your honest self-assessment of demonetization risk for this clip's content (hate speech, graphic violence, sexual content, harassment, dangerous misinformation, excessive profanity). ${monetizationInstruction}
 - thumbnailTimestamp: an absolute second in the source video with a strong facial expression or key visual for that clip.

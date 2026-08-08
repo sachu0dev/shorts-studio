@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { sanitizePlan, buildPlanPrompt } from "./analyze.js";
 
 test("sanitizePlan clamps clip duration and timestamps", () => {
-  const p = sanitizePlan({ index: 0, start: -5, end: 1000, captions: [] } as any, 100);
+  const p = sanitizePlan({ index: 0, start: -5, end: 1000, captions: [] } as any, 200);
   assert.equal(p.start, 0);
-  // Brief's test expected 100 here, but sanitizePlan (per the brief's own implementation,
-  // matching the pre-existing inline clamp and the "20-58s clip" prompt rule) caps clip
-  // length at 58s: end - start > 59 => end = start + 58. With start=0 that's 58, not 100.
-  assert.equal(p.end, 58);
+  // sanitizePlan caps clip length at 120s: end - start > 120 => end = start + 118.
+  // videoDuration raised to 200 so that clamp (not the video-length clamp) is
+  // the one actually under test.
+  assert.equal(p.end, 118);
 });
 
 test("sanitizePlan defaults missing enum fields instead of throwing", () => {
@@ -24,11 +24,11 @@ test("sanitizePlan defaults missing enum fields instead of throwing", () => {
 
 test("sanitizePlan preserves valid provided values", () => {
   const p = sanitizePlan({
-    index: 0, start: 0, end: 20, contentMode: "gaming", layoutTemplate: "shake-on-beat",
+    index: 0, start: 0, end: 20, contentMode: "gaming", layoutTemplate: "vignette-pulse",
     monetizationFlag: { risky: true, reasons: ["profanity"] },
   } as any, 100);
   assert.equal(p.contentMode, "gaming");
-  assert.equal(p.layoutTemplate, "shake-on-beat");
+  assert.equal(p.layoutTemplate, "vignette-pulse");
   assert.deepEqual(p.monetizationFlag, { risky: true, reasons: ["profanity"] });
 });
 

@@ -147,16 +147,6 @@ def fx_blurred_fill(f, t, ctx):
     return out
 
 
-def fx_shake_on_beat(f, t, ctx):
-    h, w = f.shape[:2]
-    mx, my = max(2, round(w * 0.0185)), max(2, round(h * 0.0104))  # old: 20px of 1080x1920
-    dx = int(round(mx / 2 + (mx / 4) * math.sin(t * 30)))
-    dy = int(round(my / 2 + (my / 4) * math.cos(t * 30)))
-    # The ffmpeg version left the frame at 1060x1900 and let the encoder deal
-    # with it; the raw pipe has one fixed size, so scale back up.
-    return cv2.resize(f[dy : dy + h - my, dx : dx + w - mx], (w, h))
-
-
 def fx_vignette_pulse(f, t, ctx):
     h, w = f.shape[:2]
     angle = math.pi / 4 + 0.1 * math.sin(t * 3)
@@ -201,7 +191,6 @@ EFFECTS = {
     "fullscreen": fx_fullscreen,
     "meme-corner": fx_meme_corner,
     "blurred-fill": fx_blurred_fill,
-    "shake-on-beat": fx_shake_on_beat,
     "vignette-pulse": fx_vignette_pulse,
     "glitch-cut": fx_glitch_cut,
     "color-grade-pop": fx_color_grade_pop,

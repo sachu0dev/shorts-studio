@@ -30,12 +30,14 @@ export type LayoutTemplate =
   // "zoom-punch" was removed after live feedback: `t % 2.0` pulsed the zoom
   // every 2s for the clip's entire duration rather than once, which read as a
   // stuck effect looping on the video, not a style choice.
-  | "shake-on-beat"
   // "speed-ramp" was removed in phase 6. Its ffmpeg form applied a video-only
   // setpts, so audio (and the burned captions) drifted during every ramp window.
   // Fixing it properly means retiming the .ass words and the meme windows
   // through the same piecewise time map, not just adding an atempo — phase 6's
   // gate allowed removal over shipping the desync again.
+  // "shake-on-beat" was removed after live feedback: it shook every frame of
+  // the whole clip continuously (`sin(t*30)`), not on a beat at all — it read
+  // as an earthquake for the clip's entire duration, not a style choice.
   | "vignette-pulse"
   | "glitch-cut"
   | "color-grade-pop"
