@@ -38,11 +38,15 @@ function esc(t: string) {
 }
 
 /** Build an .ass subtitle file for one clip (word-level karaoke phrase captions + top opening hook). */
-export function buildAss(plan: ClipPlan, outPath: string, words: TimedWord[] = []) {
+export function buildAss(plan: ClipPlan, outPath: string, words: TimedWord[] = [], mode?: string) {
   const dur = plan.end - plan.start;
   const events: string[] = [];
   const fontsize = plan.captionPalette === "news-serious" ? 58 : 72;
   const colors = PALETTES[plan.captionPalette] || PALETTES["hype-yellow"];
+  // Phase 11: `gameplay-facecam-stack` reserves the bottom ~35% of the canvas
+  // for the facecam (render.py's FACECAM_STACK_FRACTION) — captions must clear
+  // it or they render underneath the inset. 700 = 1920*0.35 plus headroom.
+  const marginV = mode === "gameplay-facecam-stack" ? 700 : 260;
 
   // Opening hook — placed at top center (Alignment 8) so it never collides with bottom captions
   events.push(
@@ -71,7 +75,7 @@ export function buildAss(plan: ClipPlan, outPath: string, words: TimedWord[] = [
     }
   }
 
-  const capStyle = buildStyleLine(plan.captionPalette, plan.captionFont, fontsize);
+  const capStyle = buildStyleLine(plan.captionPalette, plan.captionFont, fontsize, marginV);
   // Alignment 8 (top center), MarginV 180 — clear of bottom captions (Alignment 2, MarginV 260)
   const hookStyle = `Style: Hook,${plan.captionFont},${fontsize + 14},&H0000D7FF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,6,3,8,60,60,180,1`;
 
@@ -113,8 +117,16 @@ export async function renderClip(
   clipId: string = `clip${plan.index}`
 ): Promise<string> {
   ensureDir(outDir);
+
+  // Read the compose stage's decision first — captions.ts needs to know the
+  // mode (phase 11: `gameplay-facecam-stack` reserves a caption-free band for
+  // the facecam) before the .ass file is built, not after.
+  const compDir = path.join(jobDir, "composition");
+  const compPath = path.join(compDir, `${clipId}.json`);
+  const decision = existsSync(compPath) ? JSON.parse(readFileSync(compPath, "utf8")) : {};
+
   const assPath = path.join(outDir, `${clipId}.ass`);
-  buildAss(plan, assPath, words);
+  buildAss(plan, assPath, words, decision.mode);
   const outPath = path.join(outDir, `${clipId}.mp4`);
   const fontPath = await resolveFont(plan.captionFont);
 
@@ -139,11 +151,9 @@ export async function renderClip(
   }
 
   // The compose stage already wrote the edit decision (route, camera path,
-  // layout timeline). This adds the render inputs to the same file, so there is
-  // one artifact per clip explaining one edit rather than two half-explanations.
-  const compDir = path.join(jobDir, "composition");
-  const compPath = path.join(compDir, `${clipId}.json`);
-  const decision = existsSync(compPath) ? JSON.parse(readFileSync(compPath, "utf8")) : {};
+  // layout timeline), read above. This adds the render inputs to the same
+  // file, so there is one artifact per clip explaining one edit rather than
+  // two half-explanations.
   const dur = plan.end - plan.start;
   const composition = {
     schemaVersion: 1,

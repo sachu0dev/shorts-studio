@@ -50,6 +50,13 @@ FREEZE_SEC = 0.6  # freeze-frame-callout, matching the old tpad stop_duration
 # CANVAS. Mirrors server/pipeline/retention.ts's ASPECT_RATIO exactly.
 ASPECT_RATIO = {"9:16": 9 / 16, "1:1": 1.0, "4:3": 4 / 3, "16:9": 16 / 9}
 
+# phase 11: gaming compositing. Fractions of the OUT_H x OUT_W canvas, not the
+# decoded frame — mirrors captions.ts's stack MarginV, which reserves the same
+# bottom band for the facecam so captions never render under it.
+FACECAM_STACK_FRACTION = 0.35  # bottom band height, `gameplay-facecam-stack`
+FACECAM_PIP_FRACTION = 0.28  # corner box WIDTH, as a fraction of canvas width
+FACECAM_PIP_MARGIN = 24  # px, gap from the canvas edge
+
 # (hwaccel, video encoder, encoder options) tried in order. systemCheck proved
 # NVENC exists in phase 0, but a driver that refuses at runtime must cost a
 # warning, never the render (CLAUDE.md rule 5).
@@ -271,6 +278,65 @@ def composite_split(
     return np.vstack([top, bot])
 
 
+def _facecam_crop(frame: np.ndarray, box: dict, dec_w: int, work_h: int) -> np.ndarray:
+    """The facecam box (normalized to the decoded frame) as a BGR crop."""
+    x0, y0 = int(box["x"] * dec_w), int(box["y"] * work_h)
+    x1, y1 = int((box["x"] + box["w"]) * dec_w), int((box["y"] + box["h"]) * work_h)
+    crop = frame[max(0, y0) : min(work_h, y1), max(0, x0) : min(dec_w, x1)]
+    return crop if crop.size else frame
+
+
+def composite_facecam_stack(
+    frame: np.ndarray, gameplay_path: list[dict], facecam_box: dict, t: float, dec_w: int, work_h: int, crop_w: int
+) -> np.ndarray:
+    """`gameplay-facecam-stack`: the OUT_W x OUT_H canvas split top ~65%
+    gameplay, bottom ~35% facecam — two independent windows of the SAME
+    decoded frame, each scaled to fill its own band. Returns an already
+    canvas-shaped frame; `_fit_and_fill` downstream is a no-op on it."""
+    top_h = round(OUT_H * (1 - FACECAM_STACK_FRACTION))
+    bot_h = OUT_H - top_h
+
+    max_x = dec_w - crop_w
+    x0 = min(max_x, max(0, round(camera_cx(gameplay_path, t) * dec_w - crop_w / 2)))
+    top = cv2.resize(frame[:work_h, x0 : x0 + crop_w], (OUT_W, top_h), interpolation=cv2.INTER_LINEAR)
+
+    face = _facecam_crop(frame, facecam_box, dec_w, work_h)
+    fh_px, fw_px = face.shape[:2]
+    # Fill the band without distorting the facecam's own aspect — centre-crop
+    # whichever axis overshoots once scaled, same idea as `_fit_and_fill`.
+    scale = max(OUT_W / fw_px, bot_h / fh_px)
+    rw, rh = max(1, round(fw_px * scale)), max(1, round(fh_px * scale))
+    scaled = cv2.resize(face, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    cy0, cx0 = max(0, (rh - bot_h) // 2), max(0, (rw - OUT_W) // 2)
+    bottom = np.ascontiguousarray(scaled[cy0 : cy0 + bot_h, cx0 : cx0 + OUT_W])
+    if bottom.shape[:2] != (bot_h, OUT_W):
+        padded = np.zeros((bot_h, OUT_W, 3), np.uint8)
+        ph, pw = bottom.shape[:2]
+        padded[:ph, :pw] = bottom
+        bottom = padded
+    return np.vstack([top, bottom])
+
+
+def composite_facecam_pip(canvas: np.ndarray, frame: np.ndarray, facecam_box: dict, dec_w: int, work_h: int) -> np.ndarray:
+    """`gameplay-facecam-pip`: pastes a facecam thumbnail, with a thin border,
+    into the canvas's bottom-right corner over the already-composited gameplay
+    crop. `canvas` is post `_fit_and_fill` — OUT_W x OUT_H."""
+    face = _facecam_crop(frame, facecam_box, dec_w, work_h)
+    fh_px, fw_px = face.shape[:2]
+    pip_w = round(OUT_W * FACECAM_PIP_FRACTION)
+    pip_h = max(1, round(pip_w * fh_px / fw_px))
+    thumb = cv2.resize(face, (pip_w, pip_h), interpolation=cv2.INTER_LINEAR)
+
+    x0 = OUT_W - pip_w - FACECAM_PIP_MARGIN
+    y0 = OUT_H - pip_h - FACECAM_PIP_MARGIN
+    out = canvas.copy()
+    border = 4
+    bx0, by0 = max(0, x0 - border), max(0, y0 - border)
+    out[by0 : y0 + pip_h + border, bx0 : x0 + pip_w + border] = (255, 255, 255)
+    out[y0 : y0 + pip_h, x0 : x0 + pip_w] = thumb
+    return out
+
+
 def _window_width(src_w: int, src_h: int, dec_w: int, aspect: str) -> int:
     """Crop width in decoded-frame pixels for `aspect` — the same normalized
     fraction `server/pipeline/retention.ts`'s `cropWidthFor` computes, using the
@@ -377,6 +443,7 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> int:
     bot_path = split_path.get("bottom") or []
     active_track = comp.get("activeTrack")
     sample_step = comp.get("sampleStep") or 0.25
+    facecam_box = comp.get("facecam")  # phase 11: gaming.ts's box, normalized to source
 
     dec_cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error"]
     if hwaccel:
@@ -466,12 +533,15 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> int:
                 crop_w = _window_width(src_w, src_h, dec_w, aspect)
                 max_x = dec_w - crop_w
 
-                if seg and seg.get("mode") == "split-screen" and seg.get("targets"):
+                seg_mode = seg.get("mode") if seg else None
+                if seg_mode == "split-screen" and seg.get("targets"):
                     active = None
                     if active_track is not None:
                         k = int(t / sample_step)
                         active = active_track[k] if 0 <= k < len(active_track) else None
                     f = composite_split(frame, top_path, bot_path, t, dec_w, crop_w, active, tuple(seg["targets"]))
+                elif seg_mode == "gameplay-facecam-stack" and facecam_box:
+                    f = composite_facecam_stack(frame, path, facecam_box, t, dec_w, WORK_H, crop_w)
                 else:
                     x0 = min(max_x, max(0, round(camera_cx(path, t) * dec_w - crop_w / 2)))
                     # The slice is a view into the reused buffer, so it has to be
@@ -481,6 +551,8 @@ def _pump(comp: dict, d: Path, hwaccel, venc, venc_opts) -> int:
                     if e["t0"] <= t < e["t1"]:
                         f = EFFECTS.get(e["template"], fx_fullscreen)(f, t - e["t0"], ctx)
                 f = _fit_and_fill(f, fill)
+                if seg_mode == "gameplay-facecam-pip" and facecam_box:
+                    f = composite_facecam_pip(f, frame, facecam_box, dec_w, WORK_H)
                 outbox.put(f if f.flags["C_CONTIGUOUS"] else np.ascontiguousarray(f))
                 if freeze:
                     last = f
@@ -638,6 +710,33 @@ def _self_test() -> None:
     black = _fit_and_fill(wide, "black")
     assert black[0].max() == 0, "black fill top band was not true black"
     assert black[-1].max() == 0, "black fill bottom band was not true black"
+
+    # phase 11: gameplay-facecam-stack — a source split into a distinct top
+    # (gameplay) colour and bottom (facecam) colour must land in the matching
+    # OUT_H band, and the whole thing must already be canvas-shaped.
+    gw, gh = 400, 300
+    game_frame = np.zeros((gh, gw, 3), np.uint8)
+    game_frame[:, : gw // 2] = (0, 200, 0)   # left half: where the gameplay crop looks
+    game_frame[:, gw // 2 :] = (0, 0, 200)   # right half: the facecam box lives here
+    gameplay_path = [{"t": 0.0, "cx": 0.25, "cy": 0.5}]  # crop centred on the left half
+    facecam_box = {"x": 0.75, "y": 0.0, "w": 0.2, "h": 0.3}
+    crop_w = gw // 2
+    stacked = composite_facecam_stack(game_frame, gameplay_path, facecam_box, 0.0, gw, gh, crop_w)
+    assert stacked.shape == (OUT_H, OUT_W, 3), f"stack shape {stacked.shape}, expected canvas"
+    top_h = round(OUT_H * (1 - FACECAM_STACK_FRACTION))
+    assert stacked[top_h // 2, OUT_W // 2, 1] > stacked[top_h // 2, OUT_W // 2, 2], "top band did not pull the gameplay (green) crop"
+    assert stacked[top_h + 10, OUT_W // 2, 2] > stacked[top_h + 10, OUT_W // 2, 1], "bottom band did not pull the facecam (blue) crop"
+
+    # gameplay-facecam-pip — the thumbnail must land bottom-right and carry the
+    # facecam's colour; everywhere else must be untouched.
+    canvas = np.zeros((OUT_H, OUT_W, 3), np.uint8)
+    canvas[:] = (0, 200, 0)  # stand-in for the already-composited gameplay crop
+    pip = composite_facecam_pip(canvas, game_frame, facecam_box, gw, gh)
+    assert pip.shape == (OUT_H, OUT_W, 3)
+    pip_w = round(OUT_W * FACECAM_PIP_FRACTION)
+    cx, cy = OUT_W - FACECAM_PIP_MARGIN - pip_w // 2, OUT_H - FACECAM_PIP_MARGIN - 10
+    assert pip[cy, cx, 2] > pip[cy, cx, 1], "PiP corner did not carry the facecam (blue) colour"
+    assert np.array_equal(pip[0, 0], [0, 200, 0]), "PiP compositing touched pixels far from the corner"
 
     print("[render] self-test ok")
 

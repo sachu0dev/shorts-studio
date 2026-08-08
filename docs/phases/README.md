@@ -56,14 +56,14 @@ topmost unbuilt row, and do not infer the order from the numbers.**
 | ✅ | [29 — Content retention signal](phase-29-content-retention.md) | **built** — gates 2/4/5 pass; gate 1 passes on the one clean local solo clip; gate 3 unconfirmed (only stale pre-phase-9 ASD data available) |
 | ✅ | [30 — Adaptive framing window](phase-30-adaptive-framing.md) | **built** — gates 1/2/4/5/6/8/9 pass (gate 8 measured, 1.21×); gate 3's mechanism verified but no real clip has an internal cut; gate 7 deferred to phase 13 |
 | ✅ | [31 — Panel framing & speaker priority](phase-31-panel-framing.md) | **built** — gates 1/2/4/5/6/7 pass by unit test; gates 3/8 also confirmed on real corpus data (10 real panel clips, none render `static-center`) |
-| **1** | **[11 — Gaming composition](phase-11-gaming.md)** | **← START HERE.** Resumes the original Block A. Cheaper now that 30 delivers `blurred-fill` |
-| 2 | [12 — LLM taste layer](phase-12-llm-taste.md) | Per-segment taste, on top of a framing layer that is finally correct |
-| 3 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
-| 4 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
-| 5 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
-| 6 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **29–31 have passed; unblocked** |
-| 7 | 16 … 23 | Block C — local models, Content Hunt, scripts. **29–31 have passed; unblocked** |
-| 8 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
+| ✅ | [11 — Gaming composition](phase-11-gaming.md) | **built** — gates 3/5/6 pass (unit + full suite); gates 1/2/4/7 pass by unit/self-test only, unconfirmed on real gameplay footage (no gaming source available this session) |
+| **1** | **[12 — LLM taste layer](phase-12-llm-taste.md)** | **← START HERE.** Per-segment taste, on top of a framing layer that is finally correct |
+| 2 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
+| 3 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
+| 4 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
+| 5 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **29–31 have passed; unblocked** |
+| 6 | 16 … 23 | Block C — local models, Content Hunt, scripts. **29–31 have passed; unblocked** |
+| 7 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
 
 Two rules that outrank the table: **finish the phase you are on before starting
 the next** (a half-built phase is worse than an unstarted one), and **update the
@@ -140,9 +140,9 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [10](phase-10-split-screen.md) | Split-screen renderer | A | **built** — gates 1/6 unexercised, no corpus footage with confirmed crosstalk |
 | [29](phase-29-content-retention.md) | Content retention signal | A | **built** — gates 2/4/5 pass; gate 1 on one clean clip; gate 3 unconfirmed (stale ASD data) |
 | [30](phase-30-adaptive-framing.md) | Adaptive framing window, per segment | A | **built** — mid-clip 9:16 ⇄ 4:3 ⇄ 16:9 verified; render time 1.21× phase 10 |
-| [31](phase-31-panel-framing.md) | Panel framing & speaker priority | A | **next** — fixes the reproduced centre-crop defect |
-| [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | planned |
-| [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | planned |
+| [31](phase-31-panel-framing.md) | Panel framing & speaker priority | A | **built** — fixed the reproduced centre-crop defect |
+| [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | **built** — facecam is a pure classification over phase-4 tracks (`gaming.ts`); action-region tracking is a new CPU-only stage (`action.py`) reusing phase 7's camera smoothing via a synthetic FaceTrack; `blurred-fill` now actually shows the full frame (was silently collapsing to a 9:16 crop — no face tracks meant `narrowestSafe` always picked the narrowest candidate); gates 1/2/4/7 unconfirmed on real gameplay footage |
+| [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | **next** |
 | [13](phase-13-caption-polish.md) | Caption polish + best-frame thumbnail | A | planned |
 | [14](phase-14-rights-posture.md) | Rights posture tagging | B | planned |
 | [15](phase-15-youtube-upload.md) | YouTube OAuth + upload | B | planned |

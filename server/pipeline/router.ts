@@ -10,6 +10,7 @@ import {
   cropWidthFor, retentionOver, speakerRetentionOver, narrowestSafe, RETENTION,
   type FrameAspect,
 } from "./retention.js";
+import { detectFacecam, type ActionArtifact, type Facecam } from "./gaming.js";
 
 export { cropWidthFor } from "./retention.js";
 
@@ -19,7 +20,10 @@ export type LayoutMode =
   | "blurred-fill"
   | "group-crop"
   | "camera-switch"
-  | "split-screen";
+  | "split-screen"
+  | "gameplay-facecam-stack"
+  | "gameplay-facecam-pip"
+  | "action-follow";
 
 export interface Route {
   modes: LayoutMode[];
@@ -43,6 +47,8 @@ export const ROUTE_THRESHOLDS = {
   overlapRatio: 0.25,
   /** Three or more concurrent faces → treat as a panel, not a two-person conversation. */
   panelFaces: 3,
+  /** Below this, motion was diffuse (menu/cutscene/slow game) — chase nothing. */
+  actionConfidence: 0.5,
 };
 
 /**
@@ -67,6 +73,7 @@ export const PANEL = {
 /** What `render.py` can actually draw today. Everything else falls back. */
 export const IMPLEMENTED_MODES: LayoutMode[] = [
   "static-center", "fullscreen-follow", "blurred-fill", "group-crop", "camera-switch", "split-screen",
+  "gameplay-facecam-stack", "gameplay-facecam-pip", "action-follow",
 ];
 
 /** Modes that cannot be drawn without knowing who is speaking. */
@@ -78,7 +85,12 @@ const NEEDS_ASD: LayoutMode[] = ["camera-switch", "split-screen"];
  * never add to them, which is what makes a physically impossible layout
  * unreachable rather than merely unlikely.
  */
-export function route(sig: Signals, type: CompositionType, confidence: number): Route {
+export function route(
+  sig: Signals,
+  type: CompositionType,
+  confidence: number,
+  screenRec?: { hasFacecam: boolean; actionConfidence: number }
+): Route {
   const T = ROUTE_THRESHOLDS;
 
   if (confidence < T.confidence) {
@@ -102,11 +114,36 @@ export function route(sig: Signals, type: CompositionType, confidence: number): 
     case "b-roll":
       return { modes: ["static-center", "blurred-fill"], reason: "b-roll, no subject to follow" };
 
-    case "screen-rec":
+    case "screen-rec": {
+      // Phase 11: facecam + action-region tracking give a real gaming edit
+      // instead of the generic blurred-fill fallback. Both are optional —
+      // `screenRec` is absent when analysis has no faces at all to check, and
+      // action tracking degrades to actionConfidence 0 rather than throwing.
+      const hasFacecam = screenRec?.hasFacecam ?? false;
+      const actionConfidence = screenRec?.actionConfidence ?? 0;
+      if (hasFacecam && actionConfidence > T.actionConfidence) {
+        return {
+          modes: ["gameplay-facecam-stack", "gameplay-facecam-pip", "blurred-fill"],
+          reason: `screen-rec, facecam found and actionConfidence ${actionConfidence} > ${T.actionConfidence} — stacked gameplay + facecam`,
+        };
+      }
+      if (hasFacecam) {
+        return {
+          modes: ["gameplay-facecam-pip", "blurred-fill"],
+          reason: "screen-rec, facecam found — commentator inset preserved as a corner PiP",
+        };
+      }
+      if (actionConfidence > T.actionConfidence) {
+        return {
+          modes: ["action-follow", "blurred-fill"],
+          reason: `screen-rec, no facecam, actionConfidence ${actionConfidence} > ${T.actionConfidence} — following the action`,
+        };
+      }
       return {
         modes: ["blurred-fill", "static-center"],
-        reason: "screen-rec — a 9:16 crop throws away most of the screen",
+        reason: `screen-rec, actionConfidence ${actionConfidence} <= ${T.actionConfidence} — motion too diffuse to chase, generic edit`,
       };
+    }
 
     case "talking-head":
       return sig.subjectMotion < T.subjectMotion
@@ -227,6 +264,8 @@ export interface Composition {
    */
   activeTrack?: (number | null)[];
   sampleStep?: number;
+  /** `gameplay-facecam-stack` / `gameplay-facecam-pip` only — the commentator inset's box, in source-normalized coordinates. */
+  facecam?: { x: number; y: number; w: number; h: number };
 }
 
 /** The published file's fixed dimensions — see `Composition.canvas`. */
@@ -271,10 +310,16 @@ export function assignFrameAspects(
 ): LayoutSegment[] {
   if (!segments.length) return segments;
 
-  const ideal: FrameAspect[] = segments.map((s) =>
-    s.mode === "split-screen"
-      ? "9:16"
-      : narrowestSafe(tracks, sourceWidth, sourceHeight, s.t0, s.t1, activeTrack, sampleStep)
+  // Two modes have a fixed aspect that owes nothing to face retention:
+  // split-screen's half-crop geometry assumes 9:16, and blurred-fill's whole
+  // point is showing the uncropped gameplay frame (phase 11) — with no face
+  // tracks to protect, `narrowestSafe` would otherwise default to the
+  // NARROWEST candidate and silently turn it back into a plain 9:16 crop.
+  const fixedAspect = (mode: LayoutMode): FrameAspect | null =>
+    mode === "split-screen" ? "9:16" : mode === "blurred-fill" ? "16:9" : null;
+
+  const ideal: FrameAspect[] = segments.map(
+    (s) => fixedAspect(s.mode) ?? narrowestSafe(tracks, sourceWidth, sourceHeight, s.t0, s.t1, activeTrack, sampleStep)
   );
 
   const out: LayoutSegment[] = [];
@@ -283,10 +328,10 @@ export function assignFrameAspects(
 
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
-    if (seg.mode !== "split-screen" && ideal[i] !== committed) {
+    if (!fixedAspect(seg.mode) && ideal[i] !== committed) {
       let j = i;
       let runEnd = seg.t0;
-      while (j < segments.length && segments[j].mode !== "split-screen" && ideal[j] === ideal[i]) {
+      while (j < segments.length && !fixedAspect(segments[j].mode) && ideal[j] === ideal[i]) {
         runEnd = segments[j].t1;
         j++;
       }
@@ -304,7 +349,7 @@ export function assignFrameAspects(
       }
     }
 
-    const aspect = seg.mode === "split-screen" ? "9:16" : committed;
+    const aspect = fixedAspect(seg.mode) ?? committed;
     const r916 = retentionOver(tracks, sourceWidth, sourceHeight, seg.t0, seg.t1, "9:16");
     const reason =
       aspect === "9:16"
@@ -326,17 +371,27 @@ export function buildComposition(
   analysis: AnalysisArtifact | null,
   presetName: PresetName,
   log: (line: string) => void,
-  asd: AsdArtifact | null = null
+  asd: AsdArtifact | null = null,
+  action: ActionArtifact | null = null
 ): Composition {
   const preset = PRESETS[presetName];
   const type = analysis?.classification?.type ?? null;
   const confidence = analysis?.classification?.confidence ?? 0;
+  const tracks = analysis?.faceTracks ?? [];
+
+  // Phase 11: facecam is a pure classification over tracks phase 4 already
+  // measured — computed here rather than passed in, since `analysis` (its only
+  // input) is already in hand. `action` crosses a process boundary (real CV on
+  // raw frames) so it has to be produced upstream and threaded through.
+  const facecam: Facecam | null = type === "screen-rec" ? detectFacecam(tracks) : null;
+  const screenRec = type === "screen-rec"
+    ? { hasFacecam: !!facecam, actionConfidence: action?.actionConfidence ?? 0 }
+    : undefined;
 
   const routed: Route = analysis && type
-    ? route(analysis.signals, type, confidence)
+    ? route(analysis.signals, type, confidence, screenRec)
     : { modes: ["static-center"], reason: "no analysis for this clip — static centre" };
 
-  const tracks = analysis?.faceTracks ?? [];
   const track: FaceTrack | null = primaryTrack(tracks);
   // An ASD artifact with no stabilised track says nothing about who is talking,
   // so it must not unlock a mode that is only about who is talking.
@@ -421,6 +476,22 @@ export function buildComposition(
   const cropWidth = cropWidthFor(sourceWidth, sourceHeight);
   const cuts = analysis?.signals.sceneCuts ?? [];
 
+  // Phase 11: the three gaming modes all want the SAME camera-following
+  // machinery phase 7 already built (deadzone/EMA/snap) — reused, not
+  // reimplemented, by wrapping the action region as a synthetic FaceTrack
+  // (reserved id -1, never minted by analyze_clip.py) and letting the ordinary
+  // `buildFramedPath` generic branch pick it up like any other target.
+  const GAME_MODES: LayoutMode[] = ["action-follow", "gameplay-facecam-pip", "gameplay-facecam-stack"];
+  const actionTrack: FaceTrack | null = action?.actionRegion.length
+    ? {
+        id: -1,
+        firstSeen: action.actionRegion[0].t,
+        lastSeen: action.actionRegion[action.actionRegion.length - 1].t,
+        samples: action.actionRegion.map((r) => ({ t: r.t, cx: r.cx, cy: r.cy, w: 0, h: 0, conf: r.confidence })),
+      }
+    : null;
+  const tracksForPath = actionTrack ? [...tracks, actionTrack] : tracks;
+
   // Segment boundaries are the scene cuts: a segment that starts at one is a
   // jump, and saying so in the artifact is what makes "did it pan across a cut"
   // answerable without watching the video.
@@ -448,7 +519,7 @@ export function buildComposition(
       // checking that face was the one talking; ASD makes it measured. Presence is
       // still the fallback — a segment where nobody speaks has to frame someone.
       const speaking = asd ? activeTrackIn(asd.activeTrack, asd.sampleStep, bounds[i], bounds[i + 1]) : null;
-      const target = speaking ?? track?.id;
+      const target = GAME_MODES.includes(mode) ? actionTrack?.id : speaking ?? track?.id;
       layoutTimeline.push({
         t0: bounds[i],
         t1: bounds[i + 1],
@@ -464,7 +535,7 @@ export function buildComposition(
   // branch above — a camera-switch clip can open 9:16 on a close-up and widen
   // for a group shot exactly the same way a group-crop clip can.
   layoutTimeline = assignFrameAspects(layoutTimeline, tracks, sourceWidth, sourceHeight, asd?.activeTrack, asd?.sampleStep);
-  const cameraPath = buildFramedPath(layoutTimeline, tracks, sourceWidth, sourceHeight, preset);
+  const cameraPath = buildFramedPath(layoutTimeline, tracksForPath, sourceWidth, sourceHeight, preset);
   const splitPath =
     mode === "split-screen" && splitTargets
       ? buildSplitPath(layoutTimeline, tracks, splitTargets, cropWidth, preset)
@@ -486,6 +557,7 @@ export function buildComposition(
     layoutTimeline,
     cameraPath,
     ...(splitPath ? { splitPath } : {}),
+    ...(facecam ? { facecam: { x: facecam.x, y: facecam.y, w: facecam.w, h: facecam.h } } : {}),
     // Carried through unconditionally (not just for split-screen) so it costs
     // one branch in render.py, not a shape that differs by mode.
     ...(asd ? { speakers: asd.speakers, activeTrack: asd.activeTrack, sampleStep: asd.sampleStep } : {}),

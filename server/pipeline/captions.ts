@@ -157,7 +157,7 @@ export function buildWordOverrideTags(
 }
 
 /** One [V4+ Styles] "Style:" line for a given palette+font+size. */
-export function buildStyleLine(palette: CaptionPalette, font: string, fontsize: number): string {
+export function buildStyleLine(palette: CaptionPalette, font: string, fontsize: number, marginV = 260): string {
   const c = PALETTES[palette];
-  return `Style: Cap,${font},${fontsize},${c.normal},&H000000FF,${c.outline},${c.back},-1,0,0,0,100,100,0,0,1,5,2,2,60,60,260,1`;
+  return `Style: Cap,${font},${fontsize},${c.normal},&H000000FF,${c.outline},${c.back},-1,0,0,0,100,100,0,0,1,5,2,2,60,60,${marginV},1`;
 }

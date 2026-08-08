@@ -20,6 +20,7 @@ import { wordsForClip } from "./pipeline/captions.js";
 import { snapPlans, type ScenesArtifact } from "./pipeline/boundaries.js";
 import { classify } from "./pipeline/classify.js";
 import { buildComposition, type Composition } from "./pipeline/router.js";
+import { detectFacecam, type ActionArtifact } from "./pipeline/gaming.js";
 import type { PresetName } from "./pipeline/camera.js";
 import { transcriptSignals, wordsInWindow, type AnalysisArtifact } from "./pipeline/signals.js";
 import {
@@ -367,12 +368,44 @@ async function renderCompilationSegment(
     }
   }
 
+  // Phase 11: same action-region pass the main loop runs, screen-rec only.
+  let action: ActionArtifact | null = null;
+  if (analysis?.classification?.type === "screen-rec") {
+    const facecam = detectFacecam(analysis.faceTracks);
+    if (facecam) {
+      log(`${clipId}: facecam found — ${Math.round(facecam.w * 100)}x${Math.round(facecam.h * 100)}% inset, confidence ${facecam.confidence}`);
+    }
+    const actionStage: Stage<void, ActionArtifact> = {
+      name: `action:${clipId}`,
+      output: `action/${clipId}.json`,
+      schemaVersion: 1,
+      async run() {
+        const args = ["--clip-id", clipId, "--start", String(segPlan.start), "--end", String(segPlan.end)];
+        if (facecam) {
+          args.push(
+            "--facecam-x", String(facecam.x), "--facecam-y", String(facecam.y),
+            "--facecam-w", String(facecam.w), "--facecam-h", String(facecam.h)
+          );
+        }
+        await runPythonStage("action", jobDir, log, args);
+        const written = await store.readJson<ActionArtifact>(jobId, `action/${clipId}.json`);
+        if (!written) throw new Error(`action finished but wrote no action/${clipId}.json`);
+        return written;
+      },
+    };
+    try {
+      action = await runStage(actionStage, ctx, undefined);
+    } catch (e: any) {
+      log(`⚠️ Action tracking failed for ${clipId} (${e?.message || e}) — falling back to blurred-fill`);
+    }
+  }
+
   const composeStage: Stage<void, Composition> = {
     name: `compose:${clipId}`,
     output: `composition/${clipId}.json`,
     schemaVersion: 5,
     async run() {
-      return buildComposition(clipId, segPlan.end - segPlan.start, analysis, PRESET, log, asd);
+      return buildComposition(clipId, segPlan.end - segPlan.start, analysis, PRESET, log, asd, action);
     },
   };
   await runStage(composeStage, ctx, undefined);
@@ -682,6 +715,48 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
     }
   }
 
+  // 6c. action-region tracking — screen-rec only (phase 11). Facecam is a pure
+  // classification over face tracks `analyses` already holds; action tracking
+  // needs raw frames, so it's the one new Python CV stage this phase adds.
+  const actions = new Map<string, ActionArtifact>();
+  for (const plan of plans) {
+    const clipId = `clip${plan.index}`;
+    const analysis = analyses.get(clipId);
+    if (analysis?.classification?.type !== "screen-rec") continue;
+    const facecam = detectFacecam(analysis.faceTracks);
+    if (facecam) {
+      log(`${clipId}: facecam found — ${Math.round(facecam.w * 100)}x${Math.round(facecam.h * 100)}% inset, confidence ${facecam.confidence}`);
+    }
+    progress(job, `Tracking action ${plan.index}/${plans.length}`);
+    const actionStage: Stage<void, ActionArtifact> = {
+      name: `action:${clipId}`,
+      output: `action/${clipId}.json`,
+      schemaVersion: 1,
+      async run() {
+        const args = ["--clip-id", clipId, "--start", String(plan.start), "--end", String(plan.end)];
+        if (facecam) {
+          args.push(
+            "--facecam-x", String(facecam.x), "--facecam-y", String(facecam.y),
+            "--facecam-w", String(facecam.w), "--facecam-h", String(facecam.h)
+          );
+        }
+        await runPythonStage("action", jobDir, log, args);
+        const written = await store.readJson<ActionArtifact>(job.id, `action/${clipId}.json`);
+        if (!written) throw new Error(`action finished but wrote no action/${clipId}.json`);
+        return written;
+      },
+    };
+    try {
+      const action = await runStage(actionStage, ctx, undefined);
+      actions.set(clipId, action);
+      log(`${clipId}: actionConfidence ${action.actionConfidence}${action.hudSuppressed ? " (HUD suppressed)" : ""}`);
+    } catch (e: any) {
+      // Blurred-fill is still a correct edit for gameplay — action tracking is
+      // an upgrade over it, never a requirement (CLAUDE.md rule 5).
+      log(`⚠️ Action tracking failed for ${clipId} (${e?.message || e}) — falling back to blurred-fill`);
+    }
+  }
+
   // 7. composition — the edit decision for every clip, before any pixels move.
   // Deliberately its own pass: the decisions are reviewable, and re-rendering in
   // a different style re-runs this and nothing upstream of it.
@@ -695,7 +770,8 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
       schemaVersion: 5, // 5: per-segment frameAspect + canvas (phase 30)
       async run() {
         return buildComposition(
-          clipId, plan.end - plan.start, analyses.get(clipId) ?? null, PRESET, log, asds.get(clipId) ?? null
+          clipId, plan.end - plan.start, analyses.get(clipId) ?? null, PRESET, log, asds.get(clipId) ?? null,
+          actions.get(clipId) ?? null
         );
       },
     };
