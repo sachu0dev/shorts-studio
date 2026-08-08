@@ -329,6 +329,26 @@ export function JobPage({ jobId }: { jobId: string }) {
           </div>
         </div>
       )}
+
+      {/* compilations — themed reels stitched from short moments across the whole video */}
+      {job.compilationOutputs && job.compilationOutputs.length > 0 && (
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="font-medium">Compilations</span>
+            <span className="text-muted-foreground">({job.compilationOutputs.length})</span>
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {job.compilationOutputs.map((o, i) => (
+              <div key={i} className="flex flex-col gap-2 rounded-lg border p-3">
+                <video src={o.clip} poster={o.thumbnail} controls className="aspect-[9/16] w-full rounded bg-black" />
+                <div className="text-sm font-medium">{o.plan.title}</div>
+                <div className="text-xs text-muted-foreground">{o.plan.theme} · {o.plan.segments.length} moments</div>
+                <a href={o.clip} download className="text-xs text-primary underline underline-offset-2">Download</a>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizePlan, buildPlanPrompt, detectShowProfile } from "./analyze.js";
+import { sanitizePlan, buildPlanPrompt, detectShowProfile, sanitizeCompilationPlan, buildCompilationPrompt } from "./analyze.js";
 
 test("sanitizePlan clamps clip duration and timestamps", () => {
   const p = sanitizePlan({ index: 0, start: -5, end: 1000, captions: [] } as any, 200);
@@ -124,4 +124,62 @@ test("sanitizePlan passes through valid memes unchanged", () => {
   const meme = { start: 1, end: 3, query: "shocked cat", display: "pip-bounce" };
   const p = sanitizePlan({ index: 0, start: 0, end: 20, memes: [meme] } as any, 100);
   assert.deepEqual(p.memes, [meme]);
+});
+
+// ── compilations ────────────────────────────────────────────────────────────
+
+test("sanitizeCompilationPlan rejects a single-segment compilation", () => {
+  const p = sanitizeCompilationPlan(
+    { index: 1, theme: "t", segments: [{ start: 0, end: 5 }] } as any, 100
+  );
+  assert.equal(p, null);
+});
+
+test("sanitizeCompilationPlan keeps valid segments, clamps a too-long one to video duration then the per-moment cap", () => {
+  const p = sanitizeCompilationPlan(
+    {
+      index: 1, theme: "best", title: "Best Moments", hook: "watch", segments: [
+        { start: 5, end: 10 }, { start: 20, end: 200 }, { start: 50, end: 55 },
+      ],
+    } as any, 100
+  );
+  assert.ok(p);
+  assert.equal(p!.segments.length, 3);
+  // {20,200} clamps to {20,100} against videoDuration (80s), which itself
+  // exceeds the 20s per-moment cap, so it shrinks again to {20,40}.
+  assert.equal(p!.segments[1].end, 40);
+});
+
+test("sanitizeCompilationPlan drops a segment shorter than the minimum", () => {
+  const p = sanitizeCompilationPlan(
+    { index: 1, theme: "t", segments: [{ start: 0, end: 0.5 }, { start: 5, end: 10 }, { start: 20, end: 25 }] } as any, 100
+  );
+  assert.ok(p);
+  assert.equal(p!.segments.length, 2); // the 0.5s segment is below the minimum
+});
+
+test("sanitizeCompilationPlan caps a segment longer than the per-moment maximum", () => {
+  const p = sanitizeCompilationPlan(
+    { index: 1, theme: "t", segments: [{ start: 0, end: 40 }, { start: 50, end: 55 }] } as any, 100
+  );
+  assert.ok(p);
+  assert.equal(p!.segments[0].end - p!.segments[0].start, 20); // capped at MAX_SEGMENT
+});
+
+test("sanitizeCompilationPlan sorts segments by start time", () => {
+  const p = sanitizeCompilationPlan(
+    { index: 1, theme: "t", segments: [{ start: 50, end: 55 }, { start: 5, end: 10 }] } as any, 100
+  );
+  assert.ok(p);
+  assert.equal(p!.segments[0].start, 5);
+  assert.equal(p!.segments[1].start, 50);
+});
+
+test("buildCompilationPrompt asks for 2 to 4 themed compilations and includes the show guide", () => {
+  const prompt = buildCompilationPrompt({
+    transcript: "t", trendBrief: "b", videoDuration: 3000, controversialMode: false,
+    showGuide: "SHOW FORMAT — test guide",
+  });
+  assert.match(prompt, /2 to 4/);
+  assert.match(prompt, /SHOW FORMAT — test guide/);
 });

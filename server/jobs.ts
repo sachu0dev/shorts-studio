@@ -61,6 +61,34 @@ export interface MemeOverlay {
   display: MemeDisplayMode;
 }
 
+/** One source-video time range pulled into a compilation. Absolute seconds, not clip-relative. */
+export interface CompilationSegment {
+  start: number;
+  end: number;
+}
+
+/**
+ * A themed reel stitched from several short, non-contiguous moments across the
+ * whole video — "every performer", "best reactions" — rather than one
+ * continuous window. Each segment renders through the same per-clip pipeline
+ * as a `ClipPlan`, then the segment outputs are concatenated into one file.
+ */
+export interface CompilationPlan {
+  index: number;
+  /** Short internal label for the theme, e.g. "best performances". Not shown on screen. */
+  theme: string;
+  title: string;
+  hook: string;
+  script: string;
+  hashtags: string[];
+  segments: CompilationSegment[];
+  contentMode: ContentMode;
+  captionAnimation: CaptionAnimation;
+  captionPalette: CaptionPalette;
+  captionFont: string;
+  monetizationFlag: { risky: boolean; reasons: string[] };
+}
+
 export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" | "openrouter" | "cerebras";
 
 export interface ClipPlan {
@@ -140,6 +168,13 @@ export interface Job {
     youtubeVideoId?: string;
     uploadedAt?: number;
   }[];
+  /** Themed reels stitched from short moments across the whole video — optional, best-effort. */
+  compilations?: CompilationPlan[];
+  compilationOutputs?: {
+    clip: string;
+    thumbnail: string;
+    plan: CompilationPlan;
+  }[];
   emitter: EventEmitter;
   createdAt: number;
   timings: StageTiming[];
@@ -160,9 +195,12 @@ export interface JobRecord extends Artifact {
     controversialMode: boolean;
   };
   stages: StageTiming[];
+  title?: string;
   trendBrief?: string;
   plans?: ClipPlan[];
   outputs?: Job["outputs"];
+  compilations?: CompilationPlan[];
+  compilationOutputs?: Job["compilationOutputs"];
 }
 
 export const JOB_SCHEMA_VERSION = 1;
@@ -183,9 +221,12 @@ export function toRecord(job: Job): JobRecord {
       controversialMode: job.controversialMode,
     },
     stages: job.timings,
+    title: job.title,
     trendBrief: job.trendBrief,
     plans: job.plans,
     outputs: job.outputs,
+    compilations: job.compilations,
+    compilationOutputs: job.compilationOutputs,
   };
 }
 
@@ -297,9 +338,12 @@ export function loadJobs(store: Store, storageRoot: string): number {
       stage: rec.stage,
       error: rec.status === "running" ? "interrupted — server restarted" : rec.error,
       log: [],
+      title: rec.title,
       trendBrief: rec.trendBrief,
       plans: rec.plans,
       outputs: rec.outputs,
+      compilations: rec.compilations,
+      compilationOutputs: rec.compilationOutputs,
       emitter: new EventEmitter(),
       createdAt: rec.createdAt,
       timings: rec.stages || [],

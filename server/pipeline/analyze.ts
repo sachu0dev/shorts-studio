@@ -2,7 +2,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import type { Segment } from "./transcribe.js";
-import type { ClipPlan, AiProvider, ContentMode, CaptionAnimation, CaptionPalette, LayoutTemplate, MemeOverlay, MemeDisplayMode } from "../jobs.js";
+import type {
+  ClipPlan, AiProvider, ContentMode, CaptionAnimation, CaptionPalette, LayoutTemplate, MemeOverlay, MemeDisplayMode,
+  CompilationPlan, CompilationSegment,
+} from "../jobs.js";
 
 // ─── Lazy singletons ───────────────────────────────────────────────────────────
 function getAnthropic() {
@@ -885,4 +888,158 @@ No markdown fences, no commentary.`;
 
     console.log(`[planClips] ${provider}: ${rawPlans.length} clips`);
     return rawPlans.map((p, i) => sanitizePlan({ ...p, index: i + 1 }, videoDuration));
+  }
+
+  // ─── Compilations: themed reels stitched from short moments across the whole video ──
+
+  /** Clamp raw AI-supplied compilation segments and drop anything malformed. Never throws. */
+  function sanitizeCompilationSegments(
+    raw: Partial<CompilationSegment>[] | undefined,
+    videoDuration: number
+  ): CompilationSegment[] {
+    const MAX_SEGMENT = 20;   // seconds — a "moment", not a full performance
+    const MIN_SEGMENT = 1.5;
+    const MAX_SEGMENTS = 10;
+    const MAX_TOTAL = 150;    // keep the concatenated reel a genuine Short
+
+    const out: CompilationSegment[] = [];
+    let total = 0;
+    for (const s of raw ?? []) {
+      let start = Number(s.start);
+      let end = Number(s.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      start = Math.max(0, start);
+      end = Math.min(videoDuration, end);
+      if (end - start < MIN_SEGMENT) continue;
+      if (end - start > MAX_SEGMENT) end = start + MAX_SEGMENT;
+      if (total + (end - start) > MAX_TOTAL) continue; // skip, don't truncate — a partial moment is worse than a dropped one
+      out.push({ start, end });
+      total += end - start;
+      if (out.length >= MAX_SEGMENTS) break;
+    }
+    return out.sort((a, b) => a.start - b.start);
+  }
+
+  /** Default-fill and clamp every field of a raw AI-returned compilation. Never throws. */
+  export function sanitizeCompilationPlan(
+    p: Partial<CompilationPlan> & { index: number },
+    videoDuration: number
+  ): CompilationPlan | null {
+    const segments = sanitizeCompilationSegments(p.segments, videoDuration);
+    if (segments.length < 2) return null; // one segment isn't a compilation
+
+    return {
+      index: p.index,
+      theme: p.theme ?? "",
+      title: p.title ?? "",
+      hook: p.hook ?? "",
+      script: p.script ?? "",
+      hashtags: p.hashtags ?? [],
+      segments,
+      contentMode: VALID_CONTENT_MODES.includes(p.contentMode as ContentMode) ? (p.contentMode as ContentMode) : "funny",
+      captionAnimation: VALID_ANIMATIONS.includes(p.captionAnimation as CaptionAnimation) ? (p.captionAnimation as CaptionAnimation) : "karaoke-reveal",
+      captionPalette: VALID_PALETTES.includes(p.captionPalette as CaptionPalette) ? (p.captionPalette as CaptionPalette) : "pop-white-red",
+      captionFont: (p.captionFont ?? "Anton").replace(/[,\n\r]/g, ""),
+      monetizationFlag: p.monetizationFlag ?? { risky: false, reasons: [] },
+    };
+  }
+
+  /** Build the planCompilations prompt text. Pure function — for testability. */
+  export function buildCompilationPrompt(args: {
+    transcript: string;
+    trendBrief: string;
+    videoDuration: number;
+    controversialMode: boolean;
+    language?: string;
+    romanized?: boolean;
+    showGuide?: string;
+    /** Time ranges the normal per-moment pass already picked — nudge toward different material, not a hard exclusion. */
+    existingRanges?: { start: number; end: number }[];
+  }): string {
+    const lang = (args.language || "en").toLowerCase();
+    const hinglish = args.romanized === true || lang.startsWith("hi");
+    const languageRule = hinglish
+      ? `Write in the same romanized Hinglish register as the speakers (Latin script, mixed Hindi/English). Never output Devanagari.`
+      : `Write in ${lang.toUpperCase()}, matching the source language.`;
+
+    const showSection = args.showGuide ? `${args.showGuide}\n\n` : "";
+    const existingSection = args.existingRanges?.length
+      ? `MOMENTS ALREADY USED AS STANDALONE CLIPS (seconds — prefer different material for these compilations where the video has enough content, though reuse is fine if a moment genuinely fits a theme):
+${args.existingRanges.map((r) => `${r.start.toFixed(0)}-${r.end.toFixed(0)}`).join(", ")}
+
+`
+      : "";
+
+    return `You are compiling short, punchy montage reels from a longer video — the kind of "every X" or "best of" compilation edit that's common on Shorts/Reels, built from several SHORT moments pulled from different points in the video and cut together back to back.
+
+${showSection}${existingSection}LANGUAGE: ${languageRule}
+
+FULL VIDEO TRANSCRIPT IN SENTENCE BLOCKS [start s - end s] (video duration ${args.videoDuration.toFixed(0)}s):
+${args.transcript}
+
+TREND BRIEF (current Indian shorts trends):
+${args.trendBrief}
+
+Task: identify 2-4 distinct THEMES that recur across this video — a type of moment that happens more than once (e.g. every performer/contestant getting their turn, every big reaction, every high or low score, a running bit that repeats) — and for each theme, pick 3-10 SHORT segments (1.5-20 seconds each, ${args.controversialMode ? "edgy content is fine" : "keep it safe"}) spread across DIFFERENT points in the video that together tell that theme's story when cut back to back. A segment should make sense on its own in half a second of context — a punchline, a reaction, a verdict — not a whole scene. Do not just re-use one existing long clip; a compilation only works if it visibly jumps between different moments.
+
+Respond ONLY with a JSON array of 2 to 4 objects with keys:
+index, theme, title, hook, script, hashtags, contentMode, captionAnimation, captionPalette, captionFont, monetizationFlag, segments (array of {start, end}, all in absolute seconds from the video start).
+- title: <=90 chars, describes the compilation (e.g. "Every Contestant's Reaction").
+- hook: <=8 words shown on screen for the first 2 seconds.
+- script: 2-3 sentences describing what the compilation shows.
+- hashtags: 5-8, matching the language rule above.
+- contentMode: "funny", "gaming", or "political".
+- captionAnimation: one of "karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split".
+- captionPalette: one of "gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean".
+- captionFont: a bold Google Fonts family name.
+- monetizationFlag: {risky: boolean, reasons: string[]}.
+No markdown fences, no commentary.`;
+  }
+
+  /**
+   * Step 3 (optional, after planClips): themed compilations stitched from short
+   * moments across the whole video. One AI call, not windowed — recognizing a
+   * recurring theme benefits from seeing the whole transcript at once, and only
+   * 2-4 themes are needed rather than exhaustive coverage.
+   */
+  export async function planCompilations(
+    transcript: Segment[],
+    trendBrief: string,
+    videoDuration: number,
+    provider: AiProvider,
+    controversialMode: boolean,
+    language = "en",
+    romanized = false,
+    videoTitle?: string,
+    existingRanges?: { start: number; end: number }[]
+  ): Promise<CompilationPlan[]> {
+    const formatted = formatTranscriptForPlanning(transcript).slice(0, 180_000);
+    const showGuide = detectShowProfile(videoTitle);
+
+    const prompt = buildCompilationPrompt({
+      transcript: formatted,
+      trendBrief,
+      videoDuration,
+      controversialMode,
+      language,
+      romanized,
+      showGuide,
+      existingRanges,
+    });
+
+    const rawText = await complete(provider, prompt, 6000);
+    const jsonString = extractJsonArray(rawText);
+    let rawPlans: (Partial<CompilationPlan> & { index: number })[];
+    try {
+      rawPlans = JSON.parse(jsonString) as (Partial<CompilationPlan> & { index: number })[];
+    } catch (err: any) {
+      throw new Error(`Compilation planner JSON syntax error: ${err?.message}\nRaw JSON snippet: ${jsonString.slice(0, 200)}`);
+    }
+    if (!Array.isArray(rawPlans)) throw new Error("compilation planner did not return a JSON array");
+
+    const plans = rawPlans
+      .map((p, i) => sanitizeCompilationPlan({ ...p, index: i + 1 }, videoDuration))
+      .filter((p): p is CompilationPlan => p !== null);
+    console.log(`[planCompilations] ${provider}: ${plans.length} compilation(s) (${rawPlans.length} raw)`);
+    return plans;
   }

@@ -9,12 +9,12 @@ import { mkdirSync, renameSync, existsSync } from "node:fs";
 import { uploadMiddleware } from "./upload.js";
 import {
   createJob, getJob, listJobs, progress, publicView, saveJob, loadJobs, hydrateJobFromDisk,
-  type Job, type AiProvider, type ClipPlan,
+  type Job, type AiProvider, type ClipPlan, type CompilationPlan,
 } from "./jobs.js";
 import { downloadVideo, ensureDir } from "./pipeline/download.js";
-import { transcribeWithWhisperX, wordsToSegments, type TranscriptArtifact } from "./pipeline/transcribe.js";
-import { researchTrends, planClips } from "./pipeline/analyze.js";
-import { renderClip, renderThumbnail, getDuration } from "./pipeline/edit.js";
+import { transcribeWithWhisperX, wordsToSegments, type TranscriptArtifact, type TranscriptWord } from "./pipeline/transcribe.js";
+import { researchTrends, planClips, planCompilations } from "./pipeline/analyze.js";
+import { renderClip, renderThumbnail, getDuration, concatClips } from "./pipeline/edit.js";
 import { wordsForClip } from "./pipeline/captions.js";
 import { snapPlans, type ScenesArtifact } from "./pipeline/boundaries.js";
 import { classify } from "./pipeline/classify.js";
@@ -118,6 +118,7 @@ const STAGE_ARTIFACTS: { name: string; paths: string[] }[] = [
   { name: "trends",     paths: ["trends.json"] },
   { name: "plan",       paths: ["clips.json", "analysis", "asd", "composition", "render", "out"] },
   { name: "render",     paths: ["render", "out"] },
+  { name: "compilations", paths: ["compilations.json", "compsegments"] },
 ];
 
 app.post("/api/jobs/:id/retry-from/:stageName", async (req, res) => {
@@ -269,6 +270,115 @@ interface ClipsArtifact extends Artifact { plans: ClipPlan[] }
 interface RenderArtifact extends Artifact {
   clip: string; thumbnail: string;
   frames?: number; decoder?: string; encoder?: string;
+}
+interface CompilationsArtifact extends Artifact { plans: CompilationPlan[] }
+
+/**
+ * Runs one segment of a compilation through the same analyze -> asd -> compose
+ * -> render pipeline a normal clip gets, as a self-contained pass (not batched
+ * across all segments like the main loop) since compilations are few and each
+ * segment is short. `clipId` (e.g. "comp1seg2") keeps every artifact in its own
+ * namespace, well clear of the regular `clip<N>` ids.
+ */
+async function renderCompilationSegment(
+  jobId: string,
+  clipId: string,
+  segPlan: ClipPlan,
+  videoPath: string,
+  jobDir: string,
+  segDir: string,
+  ctx: StageCtx,
+  words: TranscriptWord[],
+  scenes: ScenesArtifact | null,
+  log: (l: string) => void
+): Promise<string> {
+  const analyzeStage: Stage<void, AnalysisArtifact> = {
+    name: `analyze:${clipId}`,
+    output: `analysis/${clipId}.json`,
+    schemaVersion: 4,
+    async run() {
+      await runPythonStage("analyze_clip", jobDir, log, [
+        "--clip-id", clipId, "--start", String(segPlan.start), "--end", String(segPlan.end),
+      ]);
+      const cv = await store.readJson<AnalysisArtifact>(jobId, `analysis/${clipId}.json`);
+      if (!cv) throw new Error(`analysis finished but wrote no analysis/${clipId}.json`);
+      const retention = summarizeRetention(cv.faceTracks, cv.sourceWidth, cv.sourceHeight, segPlan.end - segPlan.start);
+      const signals = {
+        ...cv.signals,
+        ...transcriptSignals(words, scenes?.cuts ?? [], segPlan.start, segPlan.end),
+        ...(retention ? { retention: retention.retention, narrowestSafe: retention.narrowestSafe } : {}),
+      };
+      return { ...cv, schemaVersion: 4, signals, classification: classify(signals) };
+    },
+  };
+
+  let analysis: AnalysisArtifact | null = null;
+  try {
+    analysis = await runStage(analyzeStage, ctx, undefined);
+    segPlan.compositionType = analysis.classification?.type;
+  } catch (e: any) {
+    log(`⚠️ Analysis failed for ${clipId} (${e?.message || e}) — rendering without signals`);
+  }
+
+  let asd: AsdArtifact | null = null;
+  if (analysis?.faceTracks?.length) {
+    const asdStage: Stage<void, AsdArtifact> = {
+      name: `asd:${clipId}`,
+      output: `asd/${clipId}.json`,
+      schemaVersion: 1,
+      async run() {
+        await runPythonStage("asd", jobDir, log, ["--clip-id", clipId]);
+        const written = await store.readJson<AsdArtifact>(jobId, `asd/${clipId}.json`);
+        if (!written) throw new Error(`asd finished but wrote no asd/${clipId}.json`);
+        return {
+          ...written,
+          schemaVersion: 1,
+          activeTrack: stabilizeActiveTrack(written.scores),
+          speakers: bindSpeakersToTracks(
+            written.scores, written.sampleStep,
+            wordsInWindow(words, segPlan.start, segPlan.end), segPlan.start, log
+          ),
+          asdSpeakerCount: asdSpeakerCount(written.scores, written.sampleStep),
+        };
+      },
+    };
+    try {
+      asd = await runStage(asdStage, ctx, undefined);
+      if (analysis) {
+        const retention = summarizeRetention(
+          analysis.faceTracks, analysis.sourceWidth, analysis.sourceHeight,
+          segPlan.end - segPlan.start, asd.activeTrack, asd.sampleStep
+        );
+        const signals = {
+          ...analysis.signals, asdSpeakerCount: asd.asdSpeakerCount,
+          ...(retention ? { speakerRetention: retention.speakerRetention, narrowestSafe: retention.narrowestSafe } : {}),
+        };
+        const revised = classify(signals);
+        analysis = { ...analysis, signals, classification: revised };
+        segPlan.compositionType = revised.type;
+      }
+    } catch (e: any) {
+      log(`⚠️ ASD failed for ${clipId} (${e?.message || e}) — framing the most-present face instead`);
+    }
+  }
+
+  const composeStage: Stage<void, Composition> = {
+    name: `compose:${clipId}`,
+    output: `composition/${clipId}.json`,
+    schemaVersion: 5,
+    async run() {
+      return buildComposition(clipId, segPlan.end - segPlan.start, analysis, PRESET, log, asd);
+    },
+  };
+  await runStage(composeStage, ctx, undefined);
+
+  const tail: string[] = [];
+  const capture = (l: string) => { tail.push(l); if (tail.length > 15) tail.shift(); };
+  try {
+    return await renderClip(videoPath, segPlan, jobDir, segDir, capture, wordsForClip(words, segPlan), clipId);
+  } catch (e: any) {
+    throw new Error(`${clipId}: ${e?.message || e}\n  ${tail.join("\n  ")}`);
+  }
 }
 
 async function runPipeline(job: Job, signal?: AbortSignal) {
@@ -623,6 +733,100 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
     });
     progress(job, `Clip ${plan.index} done`, `Rendered ${path.basename(out.clip)} — ${out.encoder ?? "?"}, ${out.frames ?? "?"} frames`);
     await saveJob(job, store).catch(() => {});
+  }
+
+  // 9. compilations (optional) — themed reels stitched from short moments
+  // across the whole video. Best-effort: a failure here never costs the
+  // regular clips already rendered above (CLAUDE.md rule 5).
+  progress(job, "Finding compilation themes");
+  try {
+    const compStage: Stage<void, CompilationsArtifact> = {
+      name: "compilations",
+      output: "compilations.json",
+      schemaVersion: 1,
+      async run() {
+        const compPlans = await planCompilations(
+          transcript, job.trendBrief!, ingest.duration, job.aiProvider, job.controversialMode,
+          transcriptArtifact.language, transcriptArtifact.romanized, job.title,
+          plans.map((p) => ({ start: p.start, end: p.end }))
+        );
+        return { schemaVersion: 1, plans: compPlans };
+      },
+    };
+    const compilations = (await runStage(compStage, ctx, undefined)).plans;
+    job.compilations = compilations;
+    log(`Found ${compilations.length} compilation theme(s)`);
+
+    job.compilationOutputs = [];
+    const segDir = path.join(jobDir, "compsegments");
+    for (const comp of compilations) {
+      progress(job, `Building compilation ${comp.index}/${compilations.length}: ${comp.theme}`);
+      const segmentPaths: string[] = [];
+      for (let si = 0; si < comp.segments.length; si++) {
+        const seg = comp.segments[si];
+        const clipId = `comp${comp.index}seg${si + 1}`;
+        const segPlan: ClipPlan = {
+          index: si + 1,
+          title: comp.title,
+          hook: si === 0 ? comp.hook : "",
+          start: seg.start,
+          end: seg.end,
+          reason: "",
+          script: comp.script,
+          hashtags: comp.hashtags,
+          thumbnailText: "",
+          thumbnailTimestamp: seg.start,
+          captions: [],
+          contentMode: comp.contentMode,
+          captionAnimation: comp.captionAnimation,
+          captionPalette: comp.captionPalette,
+          captionFont: comp.captionFont,
+          layoutTemplate: "fullscreen",
+          memes: [],
+          monetizationFlag: comp.monetizationFlag,
+        };
+        try {
+          const segPath = await renderCompilationSegment(
+            job.id, clipId, segPlan, videoPath, jobDir, segDir, ctx, words, scenes, log
+          );
+          segmentPaths.push(segPath);
+        } catch (e: any) {
+          log(`⚠️ Compilation ${comp.index} segment ${si + 1} failed (${e?.message || e}) — skipping that segment`);
+        }
+      }
+
+      if (segmentPaths.length < 2) {
+        log(`⚠️ Compilation ${comp.index} (${comp.theme}) has fewer than 2 usable segments — skipped`);
+        continue;
+      }
+
+      const compId = `comp${comp.index}`;
+      const outPath = path.join(outDir, `${compId}.mp4`);
+      const tail: string[] = [];
+      const capture = (l: string) => { tail.push(l); if (tail.length > 15) tail.shift(); };
+      try {
+        await concatClips(segmentPaths, outPath, capture);
+        const thumbPlan: ClipPlan = {
+          index: comp.index, title: comp.title, hook: comp.hook, start: 0, end: 0, reason: "",
+          script: comp.script, hashtags: comp.hashtags, thumbnailText: comp.title, thumbnailTimestamp: comp.segments[0].start,
+          captions: [], contentMode: comp.contentMode, captionAnimation: comp.captionAnimation,
+          captionPalette: comp.captionPalette, captionFont: comp.captionFont, layoutTemplate: "fullscreen",
+          memes: [], monetizationFlag: comp.monetizationFlag,
+        };
+        const thumbnail = await renderThumbnail(videoPath, thumbPlan, outDir, capture, compId);
+        job.compilationOutputs.push({
+          clip: `/files/${job.id}/${path.relative(jobDir, outPath)}`,
+          thumbnail: `/files/${job.id}/${path.relative(jobDir, thumbnail)}`,
+          plan: comp,
+        });
+        log(`${compId}: "${comp.theme}" — ${segmentPaths.length} segment(s) joined`);
+      } catch (e: any) {
+        log(`⚠️ Compilation ${comp.index} concat/thumbnail failed (${e?.message || e})\n  ${tail.join("\n  ")}`);
+      }
+      await saveJob(job, store).catch(() => {});
+    }
+  } catch (e: any) {
+    log(`⚠️ Compilation planning failed (${e?.message || e}) — regular clips above are unaffected`);
   }
 
   job.status = "done";

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { run, ensureDir } from "./download.js";
 import type { ClipPlan } from "../jobs.js";
 import { buildStyleLine, groupWordsIntoPhrases, PALETTES, type TimedWord } from "./captions.js";
@@ -109,10 +109,10 @@ export async function renderClip(
   jobDir: string,
   outDir: string,
   onLine: (l: string) => void,
-  words: TimedWord[] = []
+  words: TimedWord[] = [],
+  clipId: string = `clip${plan.index}`
 ): Promise<string> {
   ensureDir(outDir);
-  const clipId = `clip${plan.index}`;
   const assPath = path.join(outDir, `${clipId}.ass`);
   buildAss(plan, assPath, words);
   const outPath = path.join(outDir, `${clipId}.mp4`);
@@ -179,9 +179,10 @@ export async function renderThumbnail(
   sourceVideo: string,
   plan: ClipPlan,
   outDir: string,
-  onLine: (l: string) => void
+  onLine: (l: string) => void,
+  clipId: string = `clip${plan.index}`
 ): Promise<string> {
-  const outPath = path.join(outDir, `clip${plan.index}_thumb.jpg`);
+  const outPath = path.join(outDir, `${clipId}_thumb.jpg`);
 
   const vf = [
     "crop=ih*9/16:ih",
@@ -198,6 +199,23 @@ export async function renderThumbnail(
     onLine
   );
   return outPath;
+}
+
+/**
+ * Joins already-rendered segment clips into one file, in the given order.
+ * Every segment came out of the same render pipeline (identical codec,
+ * resolution, fps, pix_fmt), so this is a stream copy, not a re-encode —
+ * ffmpeg's concat demuxer, not `-vf`.
+ */
+export async function concatClips(segmentPaths: string[], outPath: string, onLine: (l: string) => void): Promise<void> {
+  const listPath = `${outPath}.concat.txt`;
+  const list = segmentPaths.map((p) => `file '${path.resolve(p).replace(/'/g, "'\\''")}'`).join("\n");
+  writeFileSync(listPath, list, "utf8");
+  try {
+    await run("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outPath], onLine);
+  } finally {
+    rmSync(listPath, { force: true });
+  }
 }
 
 export async function getDuration(videoPath: string): Promise<number> {

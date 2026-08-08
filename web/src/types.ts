@@ -52,6 +52,28 @@ export interface JobOutput {
   uploadedAt?: number;
 }
 
+/** A themed reel stitched from several short, non-contiguous moments — "every X", "best of". */
+export interface CompilationPlan {
+  index: number;
+  theme: string;
+  title: string;
+  hook: string;
+  script: string;
+  hashtags: string[];
+  segments: { start: number; end: number }[];
+  contentMode: "funny" | "gaming" | "political";
+  captionAnimation: string;
+  captionPalette: string;
+  captionFont: string;
+  monetizationFlag: { risky: boolean; reasons: string[] };
+}
+
+export interface CompilationOutput {
+  clip: string;
+  thumbnail: string;
+  plan: CompilationPlan;
+}
+
 export interface StageTiming {
   name: string;
   status: "done" | "error";
@@ -73,6 +95,7 @@ export interface Job {
   error?: string;
   trendBrief?: string;
   outputs?: JobOutput[];
+  compilationOutputs?: CompilationOutput[];
   timings?: StageTiming[];
   createdAt: number;
 }
