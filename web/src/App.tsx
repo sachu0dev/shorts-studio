@@ -8,6 +8,7 @@ import { NewJobPage } from "@/pages/new-job-page";
 import { JobPage } from "@/pages/job-page";
 import { SystemCheckPage } from "@/pages/system-check-page";
 import { ChannelsPage } from "@/pages/channels-page";
+import { DashboardPage } from "@/pages/dashboard-page";
 import { listJobs } from "@/lib/api";
 import type { Job } from "@/types";
 
@@ -28,6 +29,7 @@ function Layout() {
     if (location.pathname === "/") return "New job";
     if (location.pathname === "/system") return "System check";
     if (location.pathname === "/channels") return "Channels";
+    if (location.pathname === "/dashboard") return "Dashboard";
     if (location.pathname.startsWith("/jobs/")) {
       const id = location.pathname.replace("/jobs/", "");
       const job = jobs.find((j) => j.id === id);
@@ -47,6 +49,7 @@ function Layout() {
               <Route path="/" element={<NewJobPage onCreated={(id) => navigate(`/jobs/${id}`)} />} />
               <Route path="/system" element={<SystemCheckPage />} />
               <Route path="/channels" element={<ChannelsPage />} />
+              <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/jobs/:id" element={<JobPageRoute />} />
             </Routes>
           </div>

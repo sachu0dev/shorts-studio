@@ -1,4 +1,7 @@
-import type { Job, SystemCheckReport, AiProvider, TranscriptSource, RightsPosture, Channel, UploadQueue, QueueMode, QueueItem } from "@/types";
+import type {
+  Job, SystemCheckReport, AiProvider, TranscriptSource, RightsPosture, Channel, UploadQueue, QueueMode, QueueItem,
+  DashRuns, DashLibrary, DashChannels, DashUnavailable,
+} from "@/types";
 
 export async function listJobs(): Promise<Job[]> {
   const res = await fetch("/api/jobs");
@@ -149,4 +152,28 @@ export async function startUploadQueue(jobId: string): Promise<void> {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `start upload failed: ${res.status}`);
   }
+}
+
+export async function getDashRuns(stage?: string): Promise<DashRuns> {
+  const res = await fetch(`/api/dash/runs${stage ? `?stage=${encodeURIComponent(stage)}` : ""}`);
+  if (!res.ok) throw new Error(`GET /api/dash/runs failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getDashLibrary(): Promise<DashLibrary> {
+  const res = await fetch("/api/dash/library");
+  if (!res.ok) throw new Error(`GET /api/dash/library failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getDashChannels(): Promise<DashChannels> {
+  const res = await fetch("/api/dash/channels");
+  if (!res.ok) throw new Error(`GET /api/dash/channels failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getDashPanel(panel: "review" | "published" | "archive"): Promise<DashUnavailable> {
+  const res = await fetch(`/api/dash/${panel}`);
+  if (!res.ok) throw new Error(`GET /api/dash/${panel} failed: ${res.status}`);
+  return res.json();
 }

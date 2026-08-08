@@ -158,3 +158,48 @@ export interface SystemCheckReport {
   checkedAt: string;
   results: CheckResult[];
 }
+
+// Phase 28 — operations dashboard. Every field here is read straight off
+// phase 24's catalog rows; nothing on this page is computed client-side.
+export interface DashStageStat {
+  name: string;
+  runs: number;
+  meanMs: number;
+  cacheHitRate: number;
+}
+
+export interface DashRuns {
+  available: true;
+  stages: DashStageStat[];
+}
+
+export interface DashSourceRow {
+  id: string;
+  kind: "youtube" | "file";
+  url: string | null;
+  title: string | null;
+  durationSec: number | null;
+  rights: string | null;
+  mediaPath: string | null;
+  bytes: number | null;
+  firstSeenAt: number;
+  lastUsedAt: number;
+  pinned: number;
+  clipCount: number;
+  publishedCount: number;
+  archivedCount: number;
+}
+
+export interface DashLibrary {
+  available: true;
+  sources: DashSourceRow[];
+}
+
+export interface DashChannels {
+  available: true;
+  channels: Channel[];
+}
+
+export interface DashUnavailable {
+  available: false;
+}
