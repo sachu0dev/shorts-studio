@@ -27,13 +27,16 @@ These were decided up front and every phase file assumes them:
 | **C — LATER** | Local models, Content Hunt, scripts, SaaS | 16–23 |
 | **D — SELF-IMPROVING** | Record everything, judge it, publish to the right channel, learn from the result | 24–28 |
 
-**29–31 are core, and they block Blocks B and C.** Framing correctness is part of
-"good enough to publish", not a refinement after it. Uploading (14–15) or
-harvesting more sources (19–20) before the framing is right means publishing
-clips with half the cast cropped out and then discovering it at scale — the
-upload adapter has no opinion about whether a clip is well framed, and Content
-Hunt's whole value is finding more footage to run through this same pipeline.
-**Nothing in B or C starts until 29–31 pass their gates.**
+**29–31 were core, and blocked Blocks B and C until their gates passed.** Framing
+correctness is part of "good enough to publish", not a refinement after it.
+Uploading (14–15) or harvesting more sources (19–20) before the framing is
+right means publishing clips with half the cast cropped out and then
+discovering it at scale — the upload adapter has no opinion about whether a
+clip is well framed, and Content Hunt's whole value is finding more footage to
+run through this same pipeline. **All three gates have now passed (see the
+execution queue below), so B and C are unblocked** — the queue still resumes
+Block A first (11 → 13) because it's cheaper to finish while the framing work
+is fresh, not because anything is still gating it.
 
 Input is **manual for all of Block A and B** — you paste the URL at
 `localhost:5177`. That already works and is not touched.
@@ -52,15 +55,15 @@ topmost unbuilt row, and do not infer the order from the numbers.**
 | ✅ | 0–10 | built — artifact store → split-screen renderer |
 | ✅ | [29 — Content retention signal](phase-29-content-retention.md) | **built** — gates 2/4/5 pass; gate 1 passes on the one clean local solo clip; gate 3 unconfirmed (only stale pre-phase-9 ASD data available) |
 | ✅ | [30 — Adaptive framing window](phase-30-adaptive-framing.md) | **built** — gates 1/2/4/5/6/8/9 pass (gate 8 measured, 1.21×); gate 3's mechanism verified but no real clip has an internal cut; gate 7 deferred to phase 13 |
-| **1** | **[31 — Panel framing & speaker priority](phase-31-panel-framing.md)** | **← START HERE.** Fixes the live centre-crop defect. Needs 30's wide window |
-| 2 | [11 — Gaming composition](phase-11-gaming.md) | Resumes the original Block A. Cheaper after 30 delivers `blurred-fill` |
-| 3 | [12 — LLM taste layer](phase-12-llm-taste.md) | Per-segment taste, on top of a framing layer that is finally correct |
-| 4 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
-| 5 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
-| 6 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
-| 7 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **Blocked until 29–31 pass** |
-| 8 | 16 … 23 | Block C — local models, Content Hunt, scripts. **Blocked until 29–31 pass** |
-| 9 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
+| ✅ | [31 — Panel framing & speaker priority](phase-31-panel-framing.md) | **built** — gates 1/2/4/5/6/7 pass by unit test; gates 3/8 also confirmed on real corpus data (10 real panel clips, none render `static-center`) |
+| **1** | **[11 — Gaming composition](phase-11-gaming.md)** | **← START HERE.** Resumes the original Block A. Cheaper now that 30 delivers `blurred-fill` |
+| 2 | [12 — LLM taste layer](phase-12-llm-taste.md) | Per-segment taste, on top of a framing layer that is finally correct |
+| 3 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
+| 4 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
+| 5 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
+| 6 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **29–31 have passed; unblocked** |
+| 7 | 16 … 23 | Block C — local models, Content Hunt, scripts. **29–31 have passed; unblocked** |
+| 8 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
 
 Two rules that outrank the table: **finish the phase you are on before starting
 the next** (a half-built phase is worse than an unstarted one), and **update the
