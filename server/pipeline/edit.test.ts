@@ -210,3 +210,44 @@ test("renderThumbnail survives a percent sign in the title", { timeout: 120_000 
   );
   assert.ok(existsSync(out), "a percent sign must not fail the thumbnail render");
 });
+
+/**
+ * Phase 13: the best-frame timestamp comes from thumbnail/<clipId>.json
+ * (written by worker/stages/thumbnail.py), the same read-artifact-back
+ * pattern renderClip already uses for composition/taste. No artifact, or a
+ * method of "none" (no faces, no action data), must fall back to
+ * plan.thumbnailTimestamp unchanged — CLAUDE.md rule 5.
+ */
+function writeThumbnailArtifact(jobDir: string, clipId: string, artifact: object) {
+  const dir = path.join(jobDir, "thumbnail");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, `${clipId}.json`), JSON.stringify(artifact));
+}
+
+test("renderThumbnail uses the best-frame timestamp from thumbnail/<clipId>.json when present", { timeout: 120_000 }, async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "thumb-artifact-"));
+  const sourcePath = path.join(dir, "source.mp4");
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "testsrc=duration=5:size=640x480:rate=30",
+    "-t", "5", "-c:v", "libx264", sourcePath,
+  ]);
+  writeThumbnailArtifact(dir, "clip0", {
+    t: 3, score: 0.8, method: "face-best-frame", face: { cx: 0.5, cy: 0.3, w: 0.3, h: 0.3 },
+  });
+  const out = await renderThumbnail(sourcePath, samplePlan({ thumbnailTimestamp: 1 }), dir, () => {}, "clip0", dir);
+  assert.ok(existsSync(out), "renders using the artifact's timestamp instead of plan.thumbnailTimestamp");
+});
+
+test("renderThumbnail falls back to plan.thumbnailTimestamp when the artifact says method: none", { timeout: 120_000 }, async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "thumb-fallback-"));
+  const sourcePath = path.join(dir, "source.mp4");
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=640x480:rate=30",
+    "-t", "2", "-c:v", "libx264", sourcePath,
+  ]);
+  writeThumbnailArtifact(dir, "clip0", { t: null, score: null, method: "none", face: null });
+  const out = await renderThumbnail(sourcePath, samplePlan({ thumbnailTimestamp: 1 }), dir, () => {}, "clip0", dir);
+  assert.ok(existsSync(out), "b-roll with no candidate frame still renders, from thumbnailTimestamp");
+});

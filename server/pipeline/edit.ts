@@ -197,15 +197,44 @@ export async function renderClip(
   return outPath;
 }
 
-/** Thumbnail: grab the chosen frame, 9:16 crop, overlay bold title text. */
+export interface ThumbnailArtifact {
+  schemaVersion: number;
+  clipId: string;
+  t: number | null;
+  score: number | null;
+  method: "face-best-frame" | "action-best-frame" | "none";
+  face: { cx: number; cy: number; w: number; h: number } | null;
+  peakVramMb?: number;
+  ms?: number;
+}
+
+/**
+ * Thumbnail: grab the chosen frame, 9:16 crop, overlay bold title text.
+ *
+ * Phase 13: `thumbnail/<clipId>.json` (written by `worker/stages/thumbnail.py`)
+ * picks a real frame by face size/confidence/sharpness instead of the LLM's
+ * blind timestamp guess. No artifact, or method "none" (no faces, no action
+ * data), falls back to `plan.thumbnailTimestamp` unchanged — CLAUDE.md rule 5.
+ */
 export async function renderThumbnail(
   sourceVideo: string,
   plan: ClipPlan,
   outDir: string,
   onLine: (l: string) => void,
-  clipId: string = `clip${plan.index}`
+  clipId: string = `clip${plan.index}`,
+  jobDir?: string
 ): Promise<string> {
   const outPath = path.join(outDir, `${clipId}_thumb.jpg`);
+
+  const artifactPath = jobDir ? path.join(jobDir, "thumbnail", `${clipId}.json`) : null;
+  const artifact: Partial<ThumbnailArtifact> =
+    artifactPath && existsSync(artifactPath) ? JSON.parse(readFileSync(artifactPath, "utf8")) : {};
+  const timestamp = artifact.t != null ? artifact.t : plan.thumbnailTimestamp;
+  const font = await resolveFont(plan.captionFont);
+  // A face in the upper half of frame means the lower third is clear for text;
+  // a face lower in frame (or none detected) keeps the original bottom
+  // placement, which was already clear of a centered face most of the time.
+  const textY = artifact.face && artifact.face.cy < 0.5 ? "h-360" : "120";
 
   const vf = [
     "crop=ih*9/16:ih",
@@ -213,12 +242,12 @@ export async function renderThumbnail(
     "eq=contrast=1.08:saturation=1.25",
     // expansion=none makes "%" literal — without it drawtext reads %{...} as a
     // format sequence and a title like "80% Traders Lose" fails the whole render.
-    `drawtext=text='${escapeDrawtext(plan.thumbnailText)}':expansion=none:fontcolor=white:fontsize=110:borderw=8:bordercolor=black:x=(w-text_w)/2:y=h-360:font='Arial Black'`,
+    `drawtext=text='${escapeDrawtext(plan.thumbnailText)}':expansion=none:fontcolor=white:fontsize=110:borderw=8:bordercolor=black:x=(w-text_w)/2:y=${textY}:fontfile='${font}'`,
   ].join(",");
 
   await run(
     "ffmpeg",
-    ["-y", "-ss", String(plan.thumbnailTimestamp), "-i", sourceVideo, "-frames:v", "1", "-vf", vf, "-q:v", "2", outPath],
+    ["-y", "-ss", String(timestamp), "-i", sourceVideo, "-frames:v", "1", "-vf", vf, "-q:v", "2", outPath],
     onLine
   );
   return outPath;
