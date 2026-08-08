@@ -99,6 +99,17 @@ export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" |
  */
 export type TranscriptSource = "captions" | "whisper";
 
+/** Phase 14 — see server/rights.ts for the gate this field feeds. */
+export type RightsPosture = "owned" | "licensed" | "third-party";
+
+export interface RightsDeclaration {
+  posture: RightsPosture;
+  declaredAt: number;
+  declaredBy: "user";
+  ccFlagFromApi?: boolean;
+  note?: string;
+}
+
 export interface ClipPlan {
   index: number;
   title: string;
@@ -159,6 +170,8 @@ export interface Job {
   controversialMode: boolean; // default false — safe clip-selection bias
   /** Which text to trust first. Either side falls back to the other. */
   transcriptSource: TranscriptSource;
+  /** Written at creation, immutable thereafter — see server/rights.ts. */
+  rights: RightsDeclaration;
   status: "queued" | "running" | "done" | "error";
   stage: string;
   log: string[];
@@ -204,6 +217,7 @@ export interface JobRecord extends Artifact {
     description: string;
     controversialMode: boolean;
     transcriptSource?: TranscriptSource;
+    rights?: RightsDeclaration;
   };
   stages: StageTiming[];
   title?: string;
@@ -231,6 +245,7 @@ export function toRecord(job: Job): JobRecord {
       description: job.description,
       controversialMode: job.controversialMode,
       transcriptSource: job.transcriptSource,
+      rights: job.rights,
     },
     stages: job.timings,
     title: job.title,
@@ -346,6 +361,11 @@ export function loadJobs(store: Store, storageRoot: string): number {
       description: rec.input.description,
       controversialMode: rec.input.controversialMode,
       transcriptSource: rec.input.transcriptSource ?? "captions",
+      // Fail closed (phase 14 gate 5): a job.json predating this field, or one
+      // that's corrupt, reads as the posture that blocks auto-publish.
+      rights: rec.input.rights?.posture
+        ? rec.input.rights
+        : { posture: "third-party", declaredAt: rec.createdAt, declaredBy: "user" },
       // a job that was mid-flight when the process died is not still running
       status: rec.status === "running" ? "error" : rec.status,
       stage: rec.stage,
@@ -386,12 +406,18 @@ export function createJob(input: {
   description: string;
   controversialMode?: boolean;
   transcriptSource?: TranscriptSource;
+  /** Required at the HTTP boundary (POST /api/jobs) — phase 14 gate 1. Not
+   * optional here either: fail closed rather than let a caller forget. */
+  rights: RightsDeclaration;
 }): Job {
   const job: Job = {
     id: nanoid(10),
     ...input,
     controversialMode: input.controversialMode ?? false,
     transcriptSource: input.transcriptSource ?? "captions",
+    // Immutable thereafter (gate 3): nothing past this line, and no other
+    // code path in the file, ever assigns job.rights again.
+    rights: input.rights.posture ? input.rights : { posture: "third-party", declaredAt: Date.now(), declaredBy: "user" },
     status: "queued",
     stage: "Queued",
     log: [],

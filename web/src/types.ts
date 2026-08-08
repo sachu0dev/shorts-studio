@@ -4,6 +4,8 @@
 export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" | "openrouter" | "cerebras";
 /** Which text the pipeline trusts first; the other is always the fallback. */
 export type TranscriptSource = "captions" | "whisper";
+/** No default anywhere on purpose (phase 14) — forcing the choice is the point. */
+export type RightsPosture = "owned" | "licensed" | "third-party";
 export type JobStatus = "queued" | "running" | "done" | "error";
 
 export interface ClipPlan {
@@ -84,6 +86,14 @@ export interface StageTiming {
   cached?: boolean;
 }
 
+export interface RightsDeclaration {
+  posture: RightsPosture;
+  declaredAt: number;
+  declaredBy: "user";
+  ccFlagFromApi?: boolean;
+  note?: string;
+}
+
 export interface Job {
   id: string;
   url?: string;
@@ -91,6 +101,7 @@ export interface Job {
   aiProvider: AiProvider;
   description: string;
   controversialMode: boolean;
+  rights: RightsDeclaration;
   status: JobStatus;
   stage: string;
   log: string[];
@@ -99,6 +110,36 @@ export interface Job {
   outputs?: JobOutput[];
   compilationOutputs?: CompilationOutput[];
   timings?: StageTiming[];
+  createdAt: number;
+}
+
+export interface Channel {
+  id: string;
+  ytChannelId: string;
+  title: string;
+  thumbnailUrl: string;
+  customUrl?: string;
+  addedAt: number;
+}
+
+export type QueuePrivacy = "public" | "unlisted" | "private";
+export type QueueItemStatus = "pending" | "uploading" | "uploaded" | "scheduled" | "failed";
+export type QueueMode = "public" | "unlisted" | "release";
+
+export interface QueueItem {
+  clipId: string;
+  order: number;
+  channelId: string;
+  privacyStatus: QueuePrivacy;
+  publishAt?: string;
+  status: QueueItemStatus;
+  videoId?: string;
+  error?: string;
+}
+
+export interface UploadQueue {
+  jobId: string;
+  items: QueueItem[];
   createdAt: number;
 }
 

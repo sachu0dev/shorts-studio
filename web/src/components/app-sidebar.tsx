@@ -1,5 +1,6 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { Clapperboard, Plus, Activity, Loader2, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { YoutubeIcon } from "@/components/youtube-icon";
 import {
   Sidebar,
   SidebarContent,
@@ -62,6 +63,14 @@ export function AppSidebar({ jobs }: { jobs: Job[] }) {
                   <NavLink to="/">
                     <Plus />
                     <span>New job</span>
+                  </NavLink>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild isActive={location.pathname === "/channels"}>
+                  <NavLink to="/channels">
+                    <YoutubeIcon className="size-4" />
+                    <span>Channels</span>
                   </NavLink>
                 </SidebarMenuButton>
               </SidebarMenuItem>

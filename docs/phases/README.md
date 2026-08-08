@@ -57,11 +57,14 @@ topmost unbuilt row, and do not infer the order from the numbers.**
 | ✅ | [30 — Adaptive framing window](phase-30-adaptive-framing.md) | **built** — gates 1/2/4/5/6/8/9 pass (gate 8 measured, 1.21×); gate 3's mechanism verified but no real clip has an internal cut; gate 7 deferred to phase 13 |
 | ✅ | [31 — Panel framing & speaker priority](phase-31-panel-framing.md) | **built** — gates 1/2/4/5/6/7 pass by unit test; gates 3/8 also confirmed on real corpus data (10 real panel clips, none render `static-center`) |
 | ✅ | [11 — Gaming composition](phase-11-gaming.md) | **built** — gates 3/5/6 pass (unit + full suite); gates 1/2/4/7 pass by unit/self-test only, unconfirmed on real gameplay footage (no gaming source available this session) |
+| ✅ | [32 — Multi-channel YouTube OAuth](phase-32-multi-channel-oauth.md) | **built** — pulled forward from phase 26 at explicit request, ahead of phase 33's queue UI so there's a channel to upload to |
+| ✅ | [14 — Rights posture tagging](phase-14-rights-posture.md) | **built** — pulled forward, ahead of phase 33 touching `videos.insert` |
+| ✅ | [33 — Upload queue, drag-drop order, scheduled release](phase-33-upload-queue-scheduling.md) | **built** — pulled forward at explicit request; supersedes phase 15's single-clip flow (`uploader.ts` untouched behaviourally, refactored to share `upload.ts`'s resumable-upload primitive) |
 | **1** | **[12 — LLM taste layer](phase-12-llm-taste.md)** | **← START HERE.** Per-segment taste, on top of a framing layer that is finally correct |
 | 2 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
 | 3 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
 | 4 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
-| 5 | [14](phase-14-rights-posture.md) → [15](phase-15-youtube-upload.md) | Block B — upload. **29–31 have passed; unblocked** |
+| 5 | [15](phase-15-youtube-upload.md) | Superseded by 33 — nothing left to build here beyond what 33 already covers |
 | 6 | 16 … 23 | Block C — local models, Content Hunt, scripts. **29–31 have passed; unblocked** |
 | 7 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
 
@@ -144,8 +147,10 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | **built** — facecam is a pure classification over phase-4 tracks (`gaming.ts`); action-region tracking is a new CPU-only stage (`action.py`) reusing phase 7's camera smoothing via a synthetic FaceTrack; `blurred-fill` now actually shows the full frame (was silently collapsing to a 9:16 crop — no face tracks meant `narrowestSafe` always picked the narrowest candidate); gates 1/2/4/7 unconfirmed on real gameplay footage |
 | [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | **next** |
 | [13](phase-13-caption-polish.md) | Caption polish + best-frame thumbnail | A | planned |
-| [14](phase-14-rights-posture.md) | Rights posture tagging | B | planned |
-| [15](phase-15-youtube-upload.md) | YouTube OAuth + upload | B | planned |
+| [32](phase-32-multi-channel-oauth.md) | Multi-channel YouTube OAuth | B | **built** — real OAuth flow verified live against Google's consent endpoint; a real end-to-end channel link (through Google's login) not exercised this session |
+| [14](phase-14-rights-posture.md) | Rights posture tagging | B | **built** — all gates pass; `assertPublishable` also wired into the pre-existing temporary upload endpoint, not just the new adapter |
+| [15](phase-15-youtube-upload.md) | YouTube OAuth + upload | B | superseded by 33 (multi-channel, batched); `uploader.ts` kept working as-is, refactored to share `upload.ts`'s resumable-upload primitive |
+| [33](phase-33-upload-queue-scheduling.md) | Upload queue, drag-drop order, scheduled release | B | **built** — gates 3/4/5 pass by test; gates 1/2 (a real staggered release actually going public on YouTube) need a linked channel + real clips to exercise, not done this session |
 | [16](phase-16-local-provider.md) | Local model provider (Ollama) | C | planned |
 | [17](phase-17-embeddings.md) | T0 embeddings service (CPU) | C | planned |
 | [18](phase-18-quota-ledger.md) | YouTube API quota ledger | C | planned |

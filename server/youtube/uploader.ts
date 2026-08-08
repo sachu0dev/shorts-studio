@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { insertVideo } from "./upload.js";
 
 export interface YouTubeUploadInput {
   videoPath: string;
@@ -83,65 +84,14 @@ export async function uploadClipToYouTube(input: YouTubeUploadInput): Promise<Yo
       .filter(Boolean)
       .join("\n\n");
 
-    const fileStats = fs.statSync(input.videoPath);
-    const fileSize = fileStats.size;
-
-    const metadata = {
-      snippet: {
-        title: input.title.slice(0, 100), // YouTube title max 100 chars
-        description: description.slice(0, 5000), // YouTube desc max 5000 chars
-        tags: tagList.slice(0, 30),
-        categoryId: "22", // People & Blogs
-      },
-      status: {
-        privacyStatus: input.privacyStatus ?? "public",
-        selfDeclaredMadeForKids: false,
-      },
-    };
-
-    // 3. Initiate Resumable Upload Session
-    const initRes = await fetch(
-      "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json; charset=UTF-8",
-          "X-Upload-Content-Length": String(fileSize),
-          "X-Upload-Content-Type": "video/mp4",
-        },
-        body: JSON.stringify(metadata),
-      }
-    );
-
-    if (!initRes.ok) {
-      const initErr = await initRes.text();
-      throw new Error(`Failed to initiate YouTube upload session: ${initRes.status} ${initErr}`);
-    }
-
-    const uploadUrl = initRes.headers.get("location");
-    if (!uploadUrl) {
-      throw new Error("YouTube API did not return a resumable upload location URL.");
-    }
-
-    // 4. Upload Video Binary Data
-    const videoBuffer = fs.readFileSync(input.videoPath);
-    const uploadRes = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Length": String(fileSize),
-        "Content-Type": "video/mp4",
-      },
-      body: videoBuffer,
+    // 3. Resumable insert (shared primitive — server/youtube/upload.ts)
+    const videoId = await insertVideo(accessToken, input.videoPath, {
+      title: input.title,
+      description,
+      tags: tagList,
+      categoryId: "22", // People & Blogs
+      privacyStatus: input.privacyStatus ?? "public",
     });
-
-    if (!uploadRes.ok) {
-      const uploadErr = await uploadRes.text();
-      throw new Error(`Failed during video binary upload to YouTube: ${uploadRes.status} ${uploadErr}`);
-    }
-
-    const resultData = (await uploadRes.json()) as { id: string };
-    const videoId = resultData.id;
     const videoUrl = `https://youtu.be/${videoId}`;
 
     return {

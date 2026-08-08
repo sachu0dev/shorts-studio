@@ -1,4 +1,4 @@
-import type { Job, SystemCheckReport, AiProvider, TranscriptSource } from "@/types";
+import type { Job, SystemCheckReport, AiProvider, TranscriptSource, RightsPosture, Channel, UploadQueue, QueueMode, QueueItem } from "@/types";
 
 export async function listJobs(): Promise<Job[]> {
   const res = await fetch("/api/jobs");
@@ -21,6 +21,7 @@ export interface CreateJobInput {
   description: string;
   controversialMode: boolean;
   transcriptSource: TranscriptSource;
+  rightsPosture: RightsPosture;
 }
 
 export async function createJob(input: CreateJobInput): Promise<{ id: string }> {
@@ -32,6 +33,7 @@ export async function createJob(input: CreateJobInput): Promise<{ id: string }> 
     fd.append("description", input.description);
     fd.append("controversialMode", String(input.controversialMode));
     fd.append("transcriptSource", input.transcriptSource);
+    fd.append("rightsPosture", input.rightsPosture);
     fd.append("video", input.file);
     res = await fetch("/api/jobs", { method: "POST", body: fd });
   } else {
@@ -45,6 +47,7 @@ export async function createJob(input: CreateJobInput): Promise<{ id: string }> 
         description: input.description,
         controversialMode: input.controversialMode,
         transcriptSource: input.transcriptSource,
+        rightsPosture: input.rightsPosture,
       }),
     });
   }
@@ -102,4 +105,48 @@ export function watchJob(id: string, onUpdate: (job: Job) => void): () => void {
   const es = new EventSource(`/api/jobs/${id}/events`);
   es.onmessage = (e) => onUpdate(JSON.parse(e.data));
   return () => es.close();
+}
+
+export async function listChannels(): Promise<Channel[]> {
+  const res = await fetch("/api/channels");
+  if (!res.ok) throw new Error(`GET /api/channels failed: ${res.status}`);
+  return res.json();
+}
+
+export async function removeChannel(id: string): Promise<void> {
+  const res = await fetch(`/api/channels/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `remove channel failed: ${res.status}`);
+  }
+}
+
+export interface CreateQueueInput {
+  clipIds: string[];
+  channelId: string;
+  mode: QueueMode;
+  schedule?: { firstAt: string; gapMs: number };
+}
+
+async function queueRequest(method: string, jobId: string, body?: unknown): Promise<UploadQueue> {
+  const res = await fetch(`/api/jobs/${jobId}/upload-queue`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `upload queue ${method} failed: ${res.status}`);
+  return data;
+}
+
+export const createUploadQueue = (jobId: string, input: CreateQueueInput) => queueRequest("POST", jobId, input);
+export const getUploadQueue = (jobId: string) => queueRequest("GET", jobId);
+export const patchUploadQueue = (jobId: string, items: Partial<QueueItem>[]) => queueRequest("PATCH", jobId, { items });
+
+export async function startUploadQueue(jobId: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${jobId}/upload-queue/start`, { method: "POST" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `start upload failed: ${res.status}`);
+  }
 }

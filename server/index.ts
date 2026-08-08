@@ -30,6 +30,11 @@ import { summarizeRetention } from "./pipeline/retention.js";
 import { runPythonStage } from "./pipeline/python.js";
 import { runSystemCheck } from "./systemCheck.js";
 import { uploadClipToYouTube } from "./youtube/uploader.js";
+import { assertPublishable } from "./rights.js";
+import { channelsRouter } from "./youtube/routes.js";
+import { getChannel } from "./youtube/channels.js";
+import { publishQueueItem } from "./youtube/publish.js";
+import { buildQueue, readQueue, writeQueue, type QueueMode, type QueueItem } from "./uploadQueue.js";
 import { LocalStore, type Artifact } from "./artifacts.js";
 import { runStage, type Stage, type StageCtx } from "./stages.js";
 
@@ -48,6 +53,7 @@ app.use(express.json());
 // web/vite.config.ts. This line only matters in production.
 app.use(express.static(path.join(__dirname, "..", "web", "dist")));
 app.use("/files", express.static(STORAGE));
+app.use("/api/channels", channelsRouter);
 
 // ── helper: which env key is missing for a given provider
 function missingKey(provider: AiProvider): string | null {
@@ -72,13 +78,24 @@ app.post("/api/jobs", uploadMiddleware(STORAGE), (req: any, res) => {
   // run locally on code-switched speech, and needs no GPU at all.
   const transcriptSource: TranscriptSource =
     req.body.transcriptSource === "whisper" ? "whisper" : "captions";
+  // Phase 14 gate 1: no default. Submitting without an explicit choice is
+  // rejected, not silently treated as anything — forcing the choice at
+  // ingest is the whole point of the rights gate (CLAUDE.md rule 6).
+  const rightsPosture = req.body.rightsPosture as string | undefined;
 
   if (!url && !filePath) return res.status(400).json({ error: "Provide a video URL or upload a file" });
 
   const missing = missingKey(aiProvider);
   if (missing) return res.status(400).json({ error: `${missing} missing in .env — required for ${aiProvider}` });
 
-  const job = createJob({ url, filePath, clipCount, aiProvider, description, controversialMode, transcriptSource });
+  if (rightsPosture !== "owned" && rightsPosture !== "licensed" && rightsPosture !== "third-party") {
+    return res.status(400).json({ error: "rightsPosture is required: 'owned', 'licensed', or 'third-party'" });
+  }
+
+  const job = createJob({
+    url, filePath, clipCount, aiProvider, description, controversialMode, transcriptSource,
+    rights: { posture: rightsPosture, declaredAt: Date.now(), declaredBy: "user" },
+  });
   start(job);
   res.json({ id: job.id });
 });
@@ -191,6 +208,13 @@ app.post("/api/jobs/:id/clips/:index/upload-youtube", async (req, res) => {
   if (!job) return res.status(404).json({ error: "unknown job" });
   hydrateJobFromDisk(job, store);
 
+  // First line, before any network call (CLAUDE.md rule 6) — phase 14.
+  try {
+    assertPublishable(job);
+  } catch (e: any) {
+    return res.status(403).json({ error: e?.message || "third-party content cannot auto-publish" });
+  }
+
   const clipIndex = Number(req.params.index);
   const plan = job.plans?.find((p) => p.index === clipIndex);
   if (!plan) return res.status(404).json({ error: `clip plan #${clipIndex} not found` });
@@ -231,6 +255,98 @@ app.post("/api/jobs/:id/clips/:index/upload-youtube", async (req, res) => {
   }
 
   res.json(result);
+});
+
+/** Creates (or replaces) a job's upload queue from an ordered clip selection. */
+app.post("/api/jobs/:id/upload-queue", async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "unknown job" });
+
+  const clipIds = req.body?.clipIds;
+  const channelId = req.body?.channelId;
+  const mode = req.body?.mode as QueueMode;
+  const schedule = req.body?.schedule;
+
+  if (!Array.isArray(clipIds) || clipIds.length === 0) return res.status(400).json({ error: "clipIds must be a non-empty array" });
+  if (!channelId || !getChannel(channelId)) return res.status(400).json({ error: "unknown or missing channelId — link a channel first" });
+  if (!["public", "unlisted", "release"].includes(mode)) return res.status(400).json({ error: "mode must be 'public', 'unlisted', or 'release'" });
+  if (mode === "release" && (!schedule?.firstAt || !Number.isFinite(schedule?.gapMs))) {
+    return res.status(400).json({ error: "release mode requires schedule.firstAt and schedule.gapMs" });
+  }
+
+  try {
+    const queue = buildQueue(job.id, clipIds, channelId, mode, schedule);
+    await writeQueue(store, queue);
+    res.json(queue);
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message || String(e) });
+  }
+});
+
+app.get("/api/jobs/:id/upload-queue", async (req, res) => {
+  const queue = await readQueue(store, req.params.id);
+  if (!queue) return res.status(404).json({ error: "no upload queue for this job" });
+  res.json(queue);
+});
+
+/** Reorders and/or edits items (release time, channel) already in the queue. */
+app.patch("/api/jobs/:id/upload-queue", async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "unknown job" });
+  const queue = await readQueue(store, job.id);
+  if (!queue) return res.status(404).json({ error: "no upload queue for this job" });
+
+  const edits = req.body?.items as Partial<QueueItem>[] | undefined;
+  if (!Array.isArray(edits)) return res.status(400).json({ error: "items must be an array" });
+
+  for (const edit of edits) {
+    const item = queue.items.find((i) => i.clipId === edit.clipId);
+    if (!item) continue;
+    // Only fields the dialog can legitimately change — status/videoId/error
+    // are written exclusively by the publish step, never by a client edit.
+    if (edit.order !== undefined) item.order = edit.order;
+    if (edit.channelId !== undefined) item.channelId = edit.channelId;
+    if (edit.privacyStatus !== undefined) item.privacyStatus = edit.privacyStatus;
+    if (edit.publishAt !== undefined) item.publishAt = edit.publishAt;
+  }
+  queue.items.sort((a, b) => a.order - b.order);
+  await writeQueue(store, queue);
+  res.json(queue);
+});
+
+/** Runs the queue, one item at a time, in order. Progress rides the job's existing SSE stream. */
+app.post("/api/jobs/:id/upload-queue/start", async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: "unknown job" });
+  const queue = await readQueue(store, job.id);
+  if (!queue) return res.status(404).json({ error: "no upload queue for this job" });
+
+  try {
+    assertPublishable(job);
+  } catch (e: any) {
+    return res.status(403).json({ error: e?.message || "third-party content cannot auto-publish" });
+  }
+
+  res.json({ started: true, items: queue.items.length });
+
+  const log = (l: string) => progress(job, "Uploading to YouTube", l);
+  for (const item of [...queue.items].sort((a, b) => a.order - b.order)) {
+    if (item.status === "uploaded" || item.status === "scheduled") continue;
+    const plan = job.plans?.find((p) => `clip${p.index}` === item.clipId);
+    const renderArt = await store.readJson<any>(job.id, `render/${item.clipId}.json`);
+    if (!plan || !renderArt) {
+      log(`${item.clipId}: ⚠️ no rendered clip found — skipping`);
+      continue;
+    }
+    const videoPath = path.join(store.jobDir(job.id), renderArt.clip);
+    const thumbPath = renderArt.thumbnail ? path.join(store.jobDir(job.id), renderArt.thumbnail) : undefined;
+    try {
+      await publishQueueItem(job, item, plan, videoPath, thumbPath, store, log);
+    } catch (e: any) {
+      log(`${item.clipId}: ⚠️ upload failed (${e?.message || e})`);
+    }
+  }
+  log("Upload queue finished");
 });
 
 app.get("/api/jobs", (_req, res) => {

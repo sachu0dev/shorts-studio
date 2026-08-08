@@ -6,10 +6,12 @@ refine it until its gate passes, then start the next.**
 
 **What to build next lives in the execution queue in
 `docs/phases/README.md` — take the topmost unbuilt row. Phase numbers are file
-IDs, not a schedule; never pick the next phase by number.** Phases 0–11, 29, 30
-and 31 are built (framing correctness is done); 12 → 13 resumes the original
-Block A next. Upload (14–15) and Content Hunt (16–23) are unblocked now that
-29–31 pass, but the queue still finishes Block A first.
+IDs, not a schedule; never pick the next phase by number.** Phases 0–11, 14,
+29–33 are built (framing correctness is done; rights posture and the
+multi-channel upload queue were pulled forward at explicit request); 12 → 13
+resumes the original Block A next. Phase 15 is superseded by 33. Content Hunt
+(16–23) is unblocked now that 29–31 pass, but the queue still finishes Block A
+first.
 
 ## Reference documents
 

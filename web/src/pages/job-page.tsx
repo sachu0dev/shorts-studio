@@ -1,20 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Clock, Download, Terminal, Copy, Check, FileText, Sparkles, ShieldAlert, ExternalLink, Loader2, AlertCircle } from "lucide-react";
+import { ChevronDown, Clock, Download, Terminal, Copy, Check, FileText, Sparkles, ShieldAlert, ExternalLink, Loader2, AlertCircle, UploadCloud } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { watchJob, resumeJob, retryFromStage, stopJob } from "@/lib/api";
+import { YoutubeIcon } from "@/components/youtube-icon";
+import { UploadQueueDialog } from "@/components/upload-queue-dialog";
 import type { Job, AiProvider } from "@/types";
-
-function YoutubeIcon({ className = "size-4" }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-      <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
-    </svg>
-  );
-}
 
 const STAGES: { label: string; apiName: string }[] = [
   { label: "Download",      apiName: "ingest" },
@@ -91,6 +86,15 @@ export function JobPage({ jobId }: { jobId: string }) {
 
   const activeProvider = selectedProvider || job?.aiProvider || "gemini";
 
+  const [selectedClips, setSelectedClips] = useState<Set<number>>(new Set());
+  const [queueDialogOpen, setQueueDialogOpen] = useState(false);
+  const toggleClipSelected = (index: number) =>
+    setSelectedClips((cur) => {
+      const next = new Set(cur);
+      next.has(index) ? next.delete(index) : next.add(index);
+      return next;
+    });
+
   async function handleStop() {
     setActing("stop");
     try { await stopJob(jobId); }
@@ -144,9 +148,16 @@ export function JobPage({ jobId }: { jobId: string }) {
     <div className="flex flex-col gap-5 p-6">
 
       {/* title */}
-      <div>
-        <p className="truncate text-sm font-medium">{job.url || job.id}</p>
-        <p className="text-xs text-muted-foreground">Job {job.id}</p>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="truncate text-sm font-medium">{job.url || job.id}</p>
+          <p className="text-xs text-muted-foreground">Job {job.id}</p>
+        </div>
+        {job.rights?.posture === "third-party" && (
+          <span className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-500">
+            Draft — third-party, cannot auto-publish
+          </span>
+        )}
       </div>
 
       {/* ── stage tabs ── */}
@@ -318,13 +329,30 @@ export function JobPage({ jobId }: { jobId: string }) {
       {/* clips */}
       {job.outputs && job.outputs.length > 0 && (
         <div className="flex flex-col gap-4">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="font-medium">Clips</span>
-            <span className="text-muted-foreground">({job.outputs.length})</span>
+          <div className="flex items-center justify-between gap-2 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="font-medium">Clips</span>
+              <span className="text-muted-foreground">({job.outputs.length})</span>
+            </div>
+            {selectedClips.size > 0 && !job.rights?.posture?.includes("third-party") && (
+              <button
+                onClick={() => setQueueDialogOpen(true)}
+                className="flex items-center gap-1.5 rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-brand-foreground hover:bg-brand/90"
+              >
+                <UploadCloud className="size-3.5" /> Add {selectedClips.size} to upload queue
+              </button>
+            )}
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {job.outputs.map((o, i) => (
-              <ClipCard key={i} output={o} jobId={job.id} />
+              <ClipCard
+                key={i}
+                output={o}
+                jobId={job.id}
+                thirdParty={job.rights?.posture === "third-party"}
+                selected={selectedClips.has(o.plan.index)}
+                onToggleSelected={() => toggleClipSelected(o.plan.index)}
+              />
             ))}
           </div>
         </div>
@@ -349,11 +377,27 @@ export function JobPage({ jobId }: { jobId: string }) {
           </div>
         </div>
       )}
+
+      {job.outputs && (
+        <UploadQueueDialog
+          jobId={job.id}
+          clips={job.outputs
+            .filter((o) => selectedClips.has(o.plan.index))
+            .map((o) => ({ clipId: `clip${o.plan.index}`, title: o.plan.title, thumbnail: o.thumbnail }))}
+          open={queueDialogOpen}
+          onOpenChange={setQueueDialogOpen}
+        />
+      )}
     </div>
   );
 }
 
-function ClipCard({ output, jobId }: { output: NonNullable<Job["outputs"]>[number]; jobId: string }) {
+function ClipCard({
+  output, jobId, thirdParty, selected, onToggleSelected,
+}: {
+  output: NonNullable<Job["outputs"]>[number]; jobId: string; thirdParty: boolean;
+  selected: boolean; onToggleSelected: () => void;
+}) {
   const { plan, edit } = output;
   const [copied, setCopied] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -404,7 +448,12 @@ function ClipCard({ output, jobId }: { output: NonNullable<Job["outputs"]>[numbe
       <div className="flex flex-col gap-0">
         <div className="relative aspect-[9/16] bg-black group">
           <video src={output.clip} controls playsInline className="h-full w-full object-contain" />
-          <div className="absolute top-2 left-2 right-2 flex items-center justify-between gap-1">
+          {!thirdParty && (
+            <label className="absolute top-2 left-2 z-10 flex size-6 items-center justify-center rounded bg-black/70 backdrop-blur">
+              <Checkbox checked={selected} onCheckedChange={onToggleSelected} className="border-white/60 data-[state=checked]:bg-brand data-[state=checked]:border-brand" />
+            </label>
+          )}
+          <div className="absolute top-2 left-9 right-2 flex items-center justify-between gap-1">
             <span className="rounded bg-black/70 backdrop-blur px-2 py-0.5 text-[10px] font-medium text-white">
               {plan.contentMode} · {plan.layoutTemplate}
             </span>
@@ -551,6 +600,13 @@ function ClipCard({ output, jobId }: { output: NonNullable<Job["outputs"]>[numbe
           >
             <YoutubeIcon className="size-4" /> View on YouTube <ExternalLink className="size-3" />
           </a>
+        ) : thirdParty ? (
+          <div
+            title="Third-party content cannot auto-publish (CLAUDE.md rule 6) — download and publish manually instead."
+            className="flex items-center justify-center gap-2 rounded border border-dashed py-1.5 text-xs text-muted-foreground"
+          >
+            Draft only — third-party
+          </div>
         ) : (
           <button
             onClick={handleYouTubeUpload}
