@@ -5,7 +5,7 @@ if (process.env.HOME && !process.env.PATH?.includes(".local/bin")) {
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, renameSync, existsSync } from "node:fs";
+import { mkdirSync, renameSync, existsSync, symlinkSync, statSync, rmSync } from "node:fs";
 import { uploadMiddleware } from "./upload.js";
 import {
   createJob, getJob, listJobs, progress, publicView, saveJob, loadJobs, hydrateJobFromDisk,
@@ -15,7 +15,7 @@ import { downloadVideo, ensureDir } from "./pipeline/download.js";
 import { transcribeWithWhisperX, wordsToSegments, type TranscriptArtifact, type TranscriptWord } from "./pipeline/transcribe.js";
 import { fetchYoutubeCaptions } from "./pipeline/youtubeCaptions.js";
 import { researchTrends, planClips, planCompilations, complete } from "./pipeline/analyze.js";
-import { renderClip, renderThumbnail, getDuration, concatClips } from "./pipeline/edit.js";
+import { renderClip, renderThumbnail, getDuration, concatClips, type ThumbnailArtifact } from "./pipeline/edit.js";
 import { wordsForClip, type TimedWord } from "./pipeline/captions.js";
 import { snapPlans, type ScenesArtifact } from "./pipeline/boundaries.js";
 import { classify } from "./pipeline/classify.js";
@@ -38,11 +38,20 @@ import { publishQueueItem } from "./youtube/publish.js";
 import { buildQueue, readQueue, writeQueue, type QueueMode, type QueueItem } from "./uploadQueue.js";
 import { LocalStore, type Artifact } from "./artifacts.js";
 import { runStage, type Stage, type StageCtx } from "./stages.js";
+import {
+  openCatalog, normalizeYoutubeId, sha256File, claimSource, attachMedia,
+  recordJob, recordClip, recordStageRun,
+} from "./catalog.js";
+import { dashRouter } from "./dash.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STORAGE = path.resolve(process.env.STORAGE_DIR || "./storage");
 mkdirSync(STORAGE, { recursive: true });
 const store = new LocalStore(STORAGE);
+// Phase 24 — one SQLite file for source dedup + cross-job stage telemetry.
+// Shared by every job in this process; phase 17 (not built this pass) opens
+// the same file rather than starting a second database.
+const catalogDb = openCatalog(path.join(STORAGE, "catalog.db"));
 // Camera feel. Phase 21 moves this onto the creator profile; until there is a
 // profile to put it on, one env var beats a settings screen nobody asked for.
 const PRESET: PresetName = process.env.COMPOSITION_PRESET === "dynamic" ? "dynamic" : "calm";
@@ -55,6 +64,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "web", "dist")));
 app.use("/files", express.static(STORAGE));
 app.use("/api/channels", channelsRouter);
+app.use("/api/dash", dashRouter(catalogDb));
 
 // ── helper: which env key is missing for a given provider
 function missingKey(provider: AiProvider): string | null {
@@ -342,7 +352,7 @@ app.post("/api/jobs/:id/upload-queue/start", async (req, res) => {
     const videoPath = path.join(store.jobDir(job.id), renderArt.clip);
     const thumbPath = renderArt.thumbnail ? path.join(store.jobDir(job.id), renderArt.thumbnail) : undefined;
     try {
-      await publishQueueItem(job, item, plan, videoPath, thumbPath, store, log);
+      await publishQueueItem(job, item, plan, videoPath, thumbPath, store, log, catalogDb);
     } catch (e: any) {
       log(`${item.clipId}: ⚠️ upload failed (${e?.message || e})`);
     }
@@ -593,11 +603,17 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
     store,
     log,
     timings: job.timings,
-    onTiming: () => saveJob(job, store),
+    onTiming: (t) => {
+      recordStageRun(catalogDb, job.id, t);
+      return saveJob(job, store);
+    },
     signal,
   };
 
-  // 1. acquire video
+  // 1. acquire video — phase 24: claim a catalog source first so the same
+  // video, pasted again in a different job, downloads once. Identity is the
+  // video (YouTube id, or content hash for an upload), never the URL string.
+  let catalogSourceId: string | null = null;
   progress(job, job.url ? "Downloading video" : "Preparing uploaded video");
   const ingestStage: Stage<void, IngestArtifact> = {
     name: "ingest",
@@ -607,9 +623,34 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
       let videoPath: string;
       let title = "";
       if (job.url) {
-        const dl = await downloadVideo(job.url, jobDir, log);
-        videoPath = dl.videoPath;
-        title = dl.title;
+        const ytId = normalizeYoutubeId(job.url);
+        const sourceId = ytId ? `yt:${ytId}` : null;
+        if (sourceId) {
+          const claim = claimSource(catalogDb, {
+            id: sourceId, kind: "youtube", url: job.url, rights: job.rights.posture,
+          });
+          if (!claim.needsDownload && claim.mediaPath && existsSync(claim.mediaPath)) {
+            log(`source ${sourceId} already held (${claim.title ?? "no title"}) — skipping download`);
+            videoPath = path.join(jobDir, "source.mp4");
+            if (existsSync(videoPath)) rmSync(videoPath);
+            symlinkSync(claim.mediaPath, videoPath);
+            title = claim.title ?? "";
+          } else {
+            const sharedDir = path.join(STORAGE, "sources", sourceId.replace(/:/g, "_"));
+            const dl = await downloadVideo(job.url, sharedDir, log);
+            attachMedia(catalogDb, sourceId, dl.videoPath, statSync(dl.videoPath).size, dl.title);
+            videoPath = path.join(jobDir, "source.mp4");
+            symlinkSync(dl.videoPath, videoPath);
+            title = dl.title;
+          }
+          catalogSourceId = sourceId;
+        } else {
+          // URL didn't parse as a normal YouTube link (rare) — download
+          // straight into the job dir, same as before phase 24 existed.
+          const dl = await downloadVideo(job.url, jobDir, log);
+          videoPath = dl.videoPath;
+          title = dl.title;
+        }
       } else {
         videoPath = path.join(jobDir, "source.mp4");
         if (!existsSync(videoPath)) {
@@ -619,6 +660,11 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
             throw new Error(`Uploaded video file not found (checked ${job.filePath})`);
           }
         }
+        const hash = await sha256File(videoPath);
+        const sourceId = `sha256:${hash}`;
+        const claim = claimSource(catalogDb, { id: sourceId, kind: "file" });
+        if (claim.needsDownload) attachMedia(catalogDb, sourceId, videoPath, statSync(videoPath).size);
+        catalogSourceId = sourceId;
       }
       return { schemaVersion: 1, video: rel(videoPath), duration: await getDuration(videoPath), title };
     },
@@ -627,6 +673,14 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
   const videoPath = abs(ingest.video);
   job.videoPath = videoPath;
   job.title = ingest.title;
+  // A cached ingest stage (job resumed after a restart) never ran the
+  // closure above, so catalogSourceId is still null — cheap to recompute for
+  // the URL case, not worth re-hashing an already-moved upload for.
+  if (!catalogSourceId && job.url) {
+    const ytId = normalizeYoutubeId(job.url);
+    catalogSourceId = ytId ? `yt:${ytId}` : null;
+  }
+  if (catalogSourceId) recordJob(catalogDb, { id: job.id, sourceId: catalogSourceId, status: "running" });
   progress(job, "Video ready", `Duration: ${Math.round(ingest.duration)}s`);
 
   // 2. transcript — two sources, either one backing the other up.
@@ -918,6 +972,34 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
     }
   }
 
+  // 6b. thumbnail selection (phase 13) — best-scoring face frame from phase 4's
+  // samples, or phase 11's highest-actionConfidence frame for screen-rec.
+  // No candidate (b-roll, or gameplay before action tracking ran) is not an
+  // error — edit.ts falls back to the LLM's thumbnailTimestamp unchanged,
+  // same optional-upgrade pattern as every other CV stage (CLAUDE.md rule 5).
+  for (const plan of plans) {
+    const clipId = `clip${plan.index}`;
+    const thumbStage: Stage<void, ThumbnailArtifact> = {
+      name: `thumbnail:${clipId}`,
+      output: `thumbnail/${clipId}.json`,
+      schemaVersion: 1,
+      async run() {
+        await runPythonStage("thumbnail", jobDir, log, [
+          "--clip-id", clipId, "--start", String(plan.start), "--end", String(plan.end),
+        ]);
+        const written = await store.readJson<ThumbnailArtifact>(job.id, `thumbnail/${clipId}.json`);
+        if (!written) throw new Error(`thumbnail finished but wrote no thumbnail/${clipId}.json`);
+        return written;
+      },
+    };
+    try {
+      const t = await runStage(thumbStage, ctx, undefined);
+      if (t.method !== "none") log(`${clipId}: thumbnail via ${t.method} at ${t.t}s (score ${t.score})`);
+    } catch (e: any) {
+      log(`⚠️ Thumbnail selection failed for ${clipId} (${e?.message || e}) — using planned timestamp`);
+    }
+  }
+
   // 7. composition — the edit decision for every clip, before any pixels move.
   // Deliberately its own pass: the decisions are reviewable, and re-rendering in
   // a different style re-runs this and nothing upstream of it.
@@ -979,7 +1061,7 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
           // render.py writes the artifact itself, same as transcribe and scenes.
           const written = await store.readJson<RenderArtifact>(job.id, `render/${clipId}.json`);
           if (!written) throw new Error(`render finished but wrote no render/${clipId}.json`);
-          const thumbnail = await renderThumbnail(videoPath, plan, outDir, capture);
+          const thumbnail = await renderThumbnail(videoPath, plan, outDir, capture, clipId, jobDir);
           return { ...written, schemaVersion: 1, thumbnail: rel(thumbnail) };
         } catch (e: any) {
           throw new Error(`${clipId}: ${e?.message || e}\n  ${tail.join("\n  ")}`);
@@ -989,6 +1071,9 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
     const out = await runStage(renderStage, ctx, undefined);
     const c = compositions.get(clipId);
     const retentionSig = analyses.get(clipId)?.signals;
+    if (catalogSourceId) {
+      recordClip(catalogDb, { id: clipId, jobId: job.id, sourceId: catalogSourceId, startSec: plan.start, endSec: plan.end, state: "rendered" });
+    }
     job.outputs.push({
       clip: `/files/${job.id}/${out.clip}`,
       thumbnail: `/files/${job.id}/${out.thumbnail}`,
