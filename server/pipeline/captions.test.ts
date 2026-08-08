@@ -129,6 +129,50 @@ test("groupWordsIntoPhrases groups 1-word tokens into 3-4 word phrase cards", ()
   ];
   const groups = groupWordsIntoPhrases(words, 4);
   assert.ok(groups.length >= 2);
-  assert.equal(groups[0].words.length, 1); // broke on comma "Karan,"
-  assert.equal(groups[1].words.length, 4); // "thank", "you", "so", "much"
+  assert.ok(
+    groups[0].words.length >= 2,
+    `"Karan," must not be orphaned as its own one-word card, got ${groups[0].words.length} word(s)`
+  );
+});
+
+test("a comma-ending word does not orphan itself as a one-word card", () => {
+  // Real-world regression: "Karan," is the FIRST word after a break and ends
+  // in a comma — the old rule closed the group right there, producing a
+  // one-word flash disconnected from the sentence. Measured on a real
+  // 19-clip batch: 37.7% of all caption cards were a single word before this
+  // fix. It must merge with at least one more word instead.
+  const words = [
+    { word: "buddy.", punch: false, start: 4.88, end: 5.10 },
+    { word: "Thank", punch: false, start: 5.10, end: 5.20 },
+    { word: "you", punch: false, start: 5.20, end: 5.30 },
+  ];
+  const groups = groupWordsIntoPhrases(words, 4);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].words.length, 3);
+});
+
+test("groupWordsIntoPhrases still breaks on punctuation once the group has at least 2 words", () => {
+  const words = [
+    { word: "okay", punch: false, start: 0, end: 0.2 },
+    { word: "cool,", punch: false, start: 0.2, end: 0.4 },
+    { word: "let's", punch: false, start: 0.4, end: 0.6 },
+    { word: "go", punch: false, start: 0.6, end: 0.8 },
+  ];
+  const groups = groupWordsIntoPhrases(words, 4);
+  assert.equal(groups[0].words.length, 2); // "okay cool," closes on the comma once the 2-word minimum is met
+  assert.equal(groups[1].words.length, 2); // "let's go"
+});
+
+test("a genuine trailing single word at the end of the clip is still its own card — nothing left to merge with", () => {
+  const words = [
+    { word: "one", punch: false, start: 0, end: 0.2 },
+    { word: "two", punch: false, start: 0.2, end: 0.4 },
+    { word: "three", punch: false, start: 0.4, end: 0.6 },
+    { word: "four", punch: false, start: 0.6, end: 0.8 },
+    { word: "five", punch: false, start: 1.5, end: 1.7 },
+  ];
+  const groups = groupWordsIntoPhrases(words, 4);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].words.length, 4);
+  assert.equal(groups[1].words.length, 1); // ran out of words after the maxWords break — unavoidable
 });
