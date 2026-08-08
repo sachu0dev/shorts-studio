@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, existsSync } from "node:fs";
+import { readFileSync, mkdtempSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildAss, renderClip, renderThumbnail, escapeDrawtext } from "./edit.js";
@@ -24,11 +24,22 @@ function samplePlan(overrides: Partial<ClipPlan> = {}): ClipPlan {
     captionAnimation: "punch-scale-bounce",
     captionPalette: "pop-white-red",
     captionFont: "Anton",
-    layoutTemplate: "fullscreen",
     memes: [],
     monetizationFlag: { risky: false, reasons: [] },
     ...overrides,
   };
+}
+
+/**
+ * Phase 12: effects are per-segment data the compose stage writes to
+ * composition/<clipId>.json, not a field on the plan. renderClip reads that
+ * file back in (spread onto its own defaults) before rendering, so these
+ * tests write it directly the same way a real compose stage would.
+ */
+function writeEffects(jobDir: string, clipId: string, effects: { t0: number; t1: number; template: string }[]) {
+  const compDir = path.join(jobDir, "composition");
+  mkdirSync(compDir, { recursive: true });
+  writeFileSync(path.join(compDir, `${clipId}.json`), JSON.stringify({ effects }));
 }
 
 const words: TimedWord[] = [
@@ -98,16 +109,18 @@ test("renderClip produces a valid mp4 for every layout template using a syntheti
     "-t", "5", "-c:v", "libx264", "-c:a", "aac", sourcePath,
   ]);
 
-  const templates: ClipPlan["layoutTemplate"][] = [
+  const templates = [
     "fullscreen", "blurred-fill", "meme-corner",
     "vignette-pulse", "glitch-cut", "color-grade-pop",
     "letterbox-cinematic", "freeze-frame-callout",
   ];
 
-  for (const [i, layoutTemplate] of templates.entries()) {
-    const plan = samplePlan({ index: i, start: 0, end: 3, layoutTemplate, captions: [{ start: 0, end: 2, text: "test **word**" }] });
-    const outPath = await renderClip(sourcePath, plan, dir, dir, () => {});
-    assert.ok(existsSync(outPath), `${layoutTemplate} did not produce an output file`);
+  for (const [i, template] of templates.entries()) {
+    const plan = samplePlan({ index: i, start: 0, end: 3, captions: [{ start: 0, end: 2, text: "test **word**" }] });
+    const clipId = `clip${plan.index}`;
+    writeEffects(dir, clipId, [{ t0: 0, t1: 3, template }]);
+    const outPath = await renderClip(sourcePath, plan, dir, dir, () => {}, [], clipId);
+    assert.ok(existsSync(outPath), `${template} did not produce an output file`);
   }
 });
 
@@ -158,10 +171,10 @@ test("renderClip composites a meme overlay into a compound layout filter_complex
     const plan = samplePlan({
       start: 0,
       end: 3,
-      layoutTemplate: "blurred-fill",
       captions: [{ start: 0, end: 2, text: "test **word**" }],
       memes: [{ start: 0, end: 1, query: "shocked cat", display: "corner-overlay" }],
     });
+    writeEffects(dir, `clip${plan.index}`, [{ t0: 0, t1: 3, template: "blurred-fill" }]);
     const outPath = await renderClip(sourcePath, plan, dir, dir, () => {});
     assert.ok(existsSync(outPath), "meme-compositing render did not produce an output file");
   } finally {

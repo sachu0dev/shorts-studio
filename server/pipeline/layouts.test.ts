@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { buildMemeOverlayFilter } from "./layouts.js";
-import { VALID_LAYOUTS } from "./analyze.js";
+import { VALID_EFFECTS } from "./taste.js";
 import type { LayoutTemplate, MemeOverlay, MemeDisplayMode } from "../jobs.js";
 
 /**
@@ -17,12 +17,12 @@ test("every layout template has a renderer in render.py, and vice versa", () => 
   const keys = [...table.slice(0, table.indexOf("}")).matchAll(/"([a-z-]+)":/g)].map((m) => m[1]);
 
   assert.ok(keys.length > 0, "could not parse the EFFECTS table out of render.py");
-  for (const template of VALID_LAYOUTS) {
+  for (const template of VALID_EFFECTS) {
     assert.ok(keys.includes(template), `layout "${template}" has no renderer in render.py`);
   }
   for (const key of keys) {
     assert.ok(
-      VALID_LAYOUTS.includes(key as LayoutTemplate),
+      VALID_EFFECTS.includes(key as LayoutTemplate),
       `render.py renders "${key}", which is not a layout the planner can pick`
     );
   }

@@ -3,7 +3,7 @@ import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import type { Segment } from "./transcribe.js";
 import type {
-  ClipPlan, AiProvider, ContentMode, CaptionAnimation, CaptionPalette, LayoutTemplate, MemeOverlay, MemeDisplayMode,
+  ClipPlan, AiProvider, ContentMode, CaptionAnimation, CaptionPalette, MemeOverlay, MemeDisplayMode,
   CompilationPlan, CompilationSegment,
 } from "../jobs.js";
 
@@ -291,11 +291,10 @@ export function formatTranscriptForPlanning(transcript: Segment[]): string {
         captionAnimation: { type: "string" as const, enum: ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"] },
         captionPalette: { type: "string" as const, enum: ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"] },
         captionFont: { type: "string" as const },
-        layoutTemplate: { type: "string" as const, enum: ["fullscreen", "blurred-fill", "meme-corner", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout"] },
         memes: { type: "array" as const, items: { type: "object" as const, properties: { start: { type: "number" as const }, end: { type: "number" as const }, query: { type: "string" as const }, display: { type: "string" as const, enum: ["corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split"] } }, required: ["start", "end", "query", "display"] } },
         monetizationFlag: { type: "object" as const, properties: { risky: { type: "boolean" as const }, reasons: { type: "array" as const, items: { type: "string" as const } } }, required: ["risky", "reasons"] },
       },
-      required: ["index", "title", "hook", "start", "end", "reason", "script", "hashtags", "thumbnailText", "thumbnailTimestamp", "captions", "contentMode", "captionAnimation", "captionPalette", "captionFont", "layoutTemplate", "memes", "monetizationFlag"],
+      required: ["index", "title", "hook", "start", "end", "reason", "script", "hashtags", "thumbnailText", "thumbnailTimestamp", "captions", "contentMode", "captionAnimation", "captionPalette", "captionFont", "memes", "monetizationFlag"],
     },
   };
 
@@ -400,8 +399,13 @@ export function formatTranscriptForPlanning(transcript: Segment[]): string {
     }
   }
 
-  /** Route a text prompt to the selected provider and return the raw text. */
-  async function complete(
+  /**
+   * Route a text prompt to the selected provider and return the raw text.
+   * Exported so the taste stage (phase 12) can make its one call per clip
+   * through the same provider dispatch every other LLM call in this pipeline
+   * already goes through, rather than a second implementation.
+   */
+  export async function complete(
     provider: AiProvider,
     prompt: string,
     maxTokens: number,
@@ -451,7 +455,6 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
   const VALID_CONTENT_MODES: ContentMode[] = ["funny", "gaming", "political"];
   const VALID_ANIMATIONS: CaptionAnimation[] = ["karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split"];
   const VALID_PALETTES: CaptionPalette[] = ["gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean"];
-  export const VALID_LAYOUTS: LayoutTemplate[] = ["fullscreen", "blurred-fill", "meme-corner", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout"];
   const VALID_MEME_DISPLAYS: MemeDisplayMode[] = ["corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split"];
 
   /**
@@ -509,7 +512,6 @@ Return a compact brief (bullet points, <=300 words) that a video editor can use 
       // Strip commas/newlines: this value flows raw into ASS "Style:" lines downstream,
       // where a comma/newline would inject spurious fields or an extra line.
       captionFont: (p.captionFont ?? "Anton").replace(/[,\n\r]/g, ""),
-      layoutTemplate: VALID_LAYOUTS.includes(p.layoutTemplate as LayoutTemplate) ? (p.layoutTemplate as LayoutTemplate) : "fullscreen",
       memes: sanitizeMemes(p.memes, end - start),
       monetizationFlag: p.monetizationFlag ?? { risky: false, reasons: [] },
     };
@@ -636,7 +638,6 @@ Task: ${countInstruction} for YouTube Shorts. Rules:
 - captionAnimation: pick per clip from "karaoke-reveal", "punch-scale-bounce", "typewriter", "slide-up", "shake", "glitch-rgb-split" — whichever suits the clip's energy.
 - captionPalette: pick per clip from "gaming-neon", "meme-comic", "news-serious", "hype-yellow", "pop-white-red", "minimal-clean" — match to contentMode (e.g. gaming -> gaming-neon, political -> news-serious).
 - captionFont: pick a bold, high-impact Google Fonts family name appropriate to the palette (e.g. "Anton", "Bebas Neue", "Luckiest Guy", "Archivo Black", "Poppins", "Montserrat").
-- layoutTemplate: pick per clip from "fullscreen", "blurred-fill", "meme-corner", "vignette-pulse", "glitch-cut", "color-grade-pop", "letterbox-cinematic", "freeze-frame-callout".
 - memes: an array (can be empty) of {start, end, query, display} for moments where a meme/reaction GIF would land well. display is one of "corner-overlay", "full-cutaway", "pip-bounce", "sticker-pop", "side-by-side-split". query is a short search term (e.g. "shocked cat", "mind blown").
 - monetizationFlag: {risky: boolean, reasons: string[]} — your honest self-assessment of demonetization risk for this clip's content (hate speech, graphic violence, sexual content, harassment, dangerous misinformation, excessive profanity). ${monetizationInstruction}
 - thumbnailTimestamp: an absolute second in the source video with a strong facial expression or key visual for that clip.
@@ -646,7 +647,7 @@ Task: ${countInstruction} for YouTube Shorts. Rules:
 - script: a 2-3 sentence description of the clip's narrative arc (used for description text).
 
 Respond ONLY with a JSON array of ${auto ? minAuto + " to " + maxAuto : args.clipCount} objects with keys:
-index, title, hook, start, end, reason, script, hashtags, thumbnailText, thumbnailTimestamp, captions, contentMode, captionAnimation, captionPalette, captionFont, layoutTemplate, memes, monetizationFlag.
+index, title, hook, start, end, reason, script, hashtags, thumbnailText, thumbnailTimestamp, captions, contentMode, captionAnimation, captionPalette, captionFont, memes, monetizationFlag.
 No markdown fences, no commentary.`;
   }
 

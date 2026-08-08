@@ -60,13 +60,13 @@ topmost unbuilt row, and do not infer the order from the numbers.**
 | ✅ | [32 — Multi-channel YouTube OAuth](phase-32-multi-channel-oauth.md) | **built** — pulled forward from phase 26 at explicit request, ahead of phase 33's queue UI so there's a channel to upload to |
 | ✅ | [14 — Rights posture tagging](phase-14-rights-posture.md) | **built** — pulled forward, ahead of phase 33 touching `videos.insert` |
 | ✅ | [33 — Upload queue, drag-drop order, scheduled release](phase-33-upload-queue-scheduling.md) | **built** — pulled forward at explicit request; supersedes phase 15's single-clip flow (`uploader.ts` untouched behaviourally, refactored to share `upload.ts`'s resumable-upload primitive) |
-| **1** | **[12 — LLM taste layer](phase-12-llm-taste.md)** | **← START HERE.** Per-segment taste, on top of a framing layer that is finally correct |
-| 2 | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | Last of Block A |
-| 3 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
-| 4 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
-| 5 | [15](phase-15-youtube-upload.md) | Superseded by 33 — nothing left to build here beyond what 33 already covers |
-| 6 | 16 … 23 | Block C — local models, Content Hunt, scripts. **29–31 have passed; unblocked** |
-| 7 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop |
+| ✅ | [12 — LLM taste layer](phase-12-llm-taste.md) | **built** — per-segment effects, `layoutTemplate` removed |
+| **1** | **[13 — Caption polish + thumbnail](phase-13-caption-polish.md)** | **← START HERE**, thumbnail-selection half only — caption styling explicitly deferred at user request |
+| 2 | [24 — Source catalog + telemetry](phase-24-source-catalog.md) | Pulled forward from Block D |
+| 3 | [28 — Operations dashboard](phase-28-dashboard.md) | Pulled forward from Block D |
+| 4 | [15](phase-15-youtube-upload.md) | Superseded by 33 — nothing left to build here beyond what 33 already covers |
+| 5 | 16 … 23 | Block C — local models, Content Hunt, scripts. **29–31 have passed; unblocked.** At user request: 16 already done, 17/18 skipped (no consumer without 19/20), 19–23 not being built this pass |
+| 6 | 25 → 26 → 27 | Block D remainder — quality gate → multi-channel → performance loop. **Not being built this pass at user request** |
 
 Two rules that outrank the table: **finish the phase you are on before starting
 the next** (a half-built phase is worse than an unstarted one), and **update the
@@ -145,8 +145,8 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [30](phase-30-adaptive-framing.md) | Adaptive framing window, per segment | A | **built** — mid-clip 9:16 ⇄ 4:3 ⇄ 16:9 verified; render time 1.21× phase 10 |
 | [31](phase-31-panel-framing.md) | Panel framing & speaker priority | A | **built** — fixed the reproduced centre-crop defect |
 | [11](phase-11-gaming.md) | Gaming composition (facecam + action) | A | **built** — facecam is a pure classification over phase-4 tracks (`gaming.ts`); action-region tracking is a new CPU-only stage (`action.py`) reusing phase 7's camera smoothing via a synthetic FaceTrack; `blurred-fill` now actually shows the full frame (was silently collapsing to a 9:16 crop — no face tracks meant `narrowestSafe` always picked the narrowest candidate); gates 1/2/4/7 unconfirmed on real gameplay footage |
-| [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | **next** |
-| [13](phase-13-caption-polish.md) | Caption polish + best-frame thumbnail | A | planned |
+| [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | **built** — `ClipPlan.layoutTemplate` removed, replaced by per-segment `effects[]` from `taste/<clipId>.json`, merged onto the router's composition at render time; malformed/unreachable LLM response falls back to the router timeline (proven by test, not just by code reading); gate 4 ("visible improvement side-by-side") not measured against real corpus output this session |
+| [13](phase-13-caption-polish.md) | Caption polish + best-frame thumbnail | A | planned — caption styling explicitly deferred at user request; thumbnail selection remains in scope, next |
 | [32](phase-32-multi-channel-oauth.md) | Multi-channel YouTube OAuth | B | **built** — real OAuth flow verified live against Google's consent endpoint; a real end-to-end channel link (through Google's login) not exercised this session |
 | [14](phase-14-rights-posture.md) | Rights posture tagging | B | **built** — all gates pass; `assertPublishable` also wired into the pre-existing temporary upload endpoint, not just the new adapter |
 | [15](phase-15-youtube-upload.md) | YouTube OAuth + upload | B | superseded by 33 (multi-channel, batched); `uploader.ts` kept working as-is, refactored to share `upload.ts`'s resumable-upload primitive |

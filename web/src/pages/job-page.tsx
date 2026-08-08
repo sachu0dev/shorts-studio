@@ -455,7 +455,7 @@ function ClipCard({
           )}
           <div className="absolute top-2 left-9 right-2 flex items-center justify-between gap-1">
             <span className="rounded bg-black/70 backdrop-blur px-2 py-0.5 text-[10px] font-medium text-white">
-              {plan.contentMode} · {plan.layoutTemplate}
+              {plan.contentMode}{edit?.effects?.length ? ` · ${edit.effects.map((e) => e.template).join("+")}` : ""}
             </span>
             <span className="rounded bg-black/70 backdrop-blur px-1.5 py-0.5 text-[10px] font-mono text-white/80">
               {plan.start.toFixed(1)}s–{plan.end.toFixed(1)}s
@@ -564,6 +564,12 @@ function ClipCard({
                   <p>Routing: {edit.routedReason}</p>
                   {edit.fallbackReason && <p className="text-destructive">Fallback: {edit.fallbackReason}</p>}
                   {edit.encoder && <p>Encoder: {edit.encoder} ({edit.frames ?? "?"} frames)</p>}
+                  {edit.taste && (
+                    <p>
+                      Taste: {edit.taste.applied ? (edit.taste.fellBackToRouter ? "fell back to router" : "applied") : "not applied"}
+                      {edit.taste.rejected.length > 0 && ` — ${edit.taste.rejected.length} rejected`}
+                    </p>
+                  )}
                 </div>
               )}
             </CollapsibleContent>

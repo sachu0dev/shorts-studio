@@ -23,7 +23,6 @@ export interface ClipPlan {
   captionAnimation: string;
   captionPalette: string;
   captionFont: string;
-  layoutTemplate: string;
   memes: { query: string; start: number; end: number; display: string }[];
   monetizationFlag: { risky: boolean; reasons: string[] };
   compositionType?: string;
@@ -44,6 +43,9 @@ export interface EditSummary {
   /** Whole-clip fraction of faces a 9:16 crop keeps whole — phase 29. */
   retention?: Record<string, number>;
   narrowestSafe?: string;
+  /** Per-segment visual effects the taste pass chose — phase 12. */
+  effects?: { t0: number; t1: number; template: string; reason?: string }[];
+  taste?: { applied: boolean; provider?: string; fellBackToRouter: boolean; rejected: { segment: number; why: string }[] };
 }
 
 export interface JobOutput {

@@ -14,12 +14,13 @@ import {
 import { downloadVideo, ensureDir } from "./pipeline/download.js";
 import { transcribeWithWhisperX, wordsToSegments, type TranscriptArtifact, type TranscriptWord } from "./pipeline/transcribe.js";
 import { fetchYoutubeCaptions } from "./pipeline/youtubeCaptions.js";
-import { researchTrends, planClips, planCompilations } from "./pipeline/analyze.js";
+import { researchTrends, planClips, planCompilations, complete } from "./pipeline/analyze.js";
 import { renderClip, renderThumbnail, getDuration, concatClips } from "./pipeline/edit.js";
-import { wordsForClip } from "./pipeline/captions.js";
+import { wordsForClip, type TimedWord } from "./pipeline/captions.js";
 import { snapPlans, type ScenesArtifact } from "./pipeline/boundaries.js";
 import { classify } from "./pipeline/classify.js";
 import { buildComposition, type Composition } from "./pipeline/router.js";
+import { buildTastePrompt, validateTasteResponse, type TasteResult } from "./pipeline/taste.js";
 import { detectFacecam, type ActionArtifact } from "./pipeline/gaming.js";
 import type { PresetName } from "./pipeline/camera.js";
 import { transcriptSignals, wordsInWindow, type AnalysisArtifact } from "./pipeline/signals.js";
@@ -412,7 +413,8 @@ async function renderCompilationSegment(
   ctx: StageCtx,
   words: TranscriptWord[],
   scenes: ScenesArtifact | null,
-  log: (l: string) => void
+  log: (l: string) => void,
+  aiProvider: AiProvider
 ): Promise<string> {
   const analyzeStage: Stage<void, AnalysisArtifact> = {
     name: `analyze:${clipId}`,
@@ -524,15 +526,58 @@ async function renderCompilationSegment(
       return buildComposition(clipId, segPlan.end - segPlan.start, analysis, PRESET, log, asd, action);
     },
   };
-  await runStage(composeStage, ctx, undefined);
+  const comp = await runStage(composeStage, ctx, undefined);
+  const clipWords = wordsForClip(words, segPlan);
+  await runTasteStage(clipId, comp, analysis, clipWords, aiProvider, ctx, log);
 
   const tail: string[] = [];
   const capture = (l: string) => { tail.push(l); if (tail.length > 15) tail.shift(); };
   try {
-    return await renderClip(videoPath, segPlan, jobDir, segDir, capture, wordsForClip(words, segPlan), clipId);
+    return await renderClip(videoPath, segPlan, jobDir, segDir, capture, clipWords, clipId);
   } catch (e: any) {
     throw new Error(`${clipId}: ${e?.message || e}\n  ${tail.join("\n  ")}`);
   }
+}
+
+/**
+ * Phase 12 — one LLM call per clip, refining the router's timeline within
+ * `allowedModes` and choosing per-segment effects. A malformed or failed
+ * response is structurally harmless: `validateTasteResponse` always returns
+ * a valid result, falling back to the router's own timeline (phases 7-11
+ * already produced a shippable edit before this stage existed). Written to
+ * its own artifact (not composition/<clipId>.json) so this stage's
+ * idempotency never fights the compose stage's — edit.ts merges the two at
+ * render time, the same pattern asd.json/action.json already use.
+ */
+async function runTasteStage(
+  clipId: string,
+  comp: Composition,
+  analysis: AnalysisArtifact | null,
+  clipWords: TimedWord[],
+  aiProvider: AiProvider,
+  ctx: StageCtx,
+  log: (l: string) => void
+): Promise<TasteResult & Artifact> {
+  const tasteStage: Stage<void, TasteResult & Artifact> = {
+    name: `taste:${clipId}`,
+    output: `taste/${clipId}.json`,
+    schemaVersion: 1,
+    async run() {
+      const prompt = buildTastePrompt(comp, analysis, clipWords);
+      let raw: unknown = null;
+      try {
+        raw = await complete(aiProvider, prompt, 2000);
+      } catch (e: any) {
+        log(`${clipId}: ⚠️ taste LLM call failed (${e?.message || e}) — using router timeline`);
+      }
+      const result = validateTasteResponse(raw, comp);
+      if (result.taste.rejected.length) {
+        log(`${clipId}: taste — ${result.taste.rejected.map((r) => r.why).join("; ")}`);
+      }
+      return { schemaVersion: 1, ...result };
+    },
+  };
+  return runStage(tasteStage, ctx, undefined);
 }
 
 async function runPipeline(job: Job, signal?: AbortSignal) {
@@ -901,6 +946,16 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
     if (aspects.length > 1 || aspects[0] !== "9:16") {
       log(`${clipId}: window widened to ${aspects.join(" → ")} — see layoutTimeline[].reason`);
     }
+
+    // Phase 12 — taste pass. One LLM call per clip, refining within
+    // allowedModes and choosing per-segment effects; router timeline stays
+    // shippable no matter what this returns.
+    const taste = await runTasteStage(
+      clipId, c, analyses.get(clipId) ?? null, wordsForClip(words, plan), job.aiProvider, ctx, log
+    );
+    if (taste.taste.applied && !taste.taste.fellBackToRouter) {
+      log(`${clipId}: taste applied — ${taste.effects.length} effect(s)${taste.taste.rejected.length ? `, ${taste.taste.rejected.length} rejected` : ""}`);
+    }
   }
 
   // 8. render clips + thumbnails
@@ -1004,13 +1059,12 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
           captionAnimation: comp.captionAnimation,
           captionPalette: comp.captionPalette,
           captionFont: comp.captionFont,
-          layoutTemplate: "fullscreen",
           memes: [],
           monetizationFlag: comp.monetizationFlag,
         };
         try {
           const segPath = await renderCompilationSegment(
-            job.id, clipId, segPlan, videoPath, jobDir, segDir, ctx, words, scenes, log
+            job.id, clipId, segPlan, videoPath, jobDir, segDir, ctx, words, scenes, log, job.aiProvider
           );
           segmentPaths.push(segPath);
         } catch (e: any) {
@@ -1033,7 +1087,7 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
           index: comp.index, title: comp.title, hook: comp.hook, start: 0, end: 0, reason: "",
           script: comp.script, hashtags: comp.hashtags, thumbnailText: comp.title, thumbnailTimestamp: comp.segments[0].start,
           captions: [], contentMode: comp.contentMode, captionAnimation: comp.captionAnimation,
-          captionPalette: comp.captionPalette, captionFont: comp.captionFont, layoutTemplate: "fullscreen",
+          captionPalette: comp.captionPalette, captionFont: comp.captionFont,
           memes: [], monetizationFlag: comp.monetizationFlag,
         };
         const thumbnail = await renderThumbnail(videoPath, thumbPlan, outDir, capture, compId);

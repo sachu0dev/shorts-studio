@@ -125,6 +125,17 @@ export async function renderClip(
   const compPath = path.join(compDir, `${clipId}.json`);
   const decision = existsSync(compPath) ? JSON.parse(readFileSync(compPath, "utf8")) : {};
 
+  // Phase 12: the taste pass lives in its own artifact (taste/<clipId>.json),
+  // not composition/<clipId>.json — two stages writing the same file would
+  // fight over schemaVersion. Its refined layoutTimeline/effects win over the
+  // router's plain ones when present; absent (no taste pass, or it fell back)
+  // means the router's own decision stands unchanged.
+  const tastePath = path.join(jobDir, "taste", `${clipId}.json`);
+  const taste = existsSync(tastePath) ? JSON.parse(readFileSync(tastePath, "utf8")) : {};
+  if (taste.layoutTimeline) decision.layoutTimeline = taste.layoutTimeline;
+  if (taste.effects) decision.effects = taste.effects;
+  if (taste.taste) decision.taste = taste.taste;
+
   const assPath = path.join(outDir, `${clipId}.ass`);
   buildAss(plan, assPath, words, decision.mode);
   const outPath = path.join(outDir, `${clipId}.mp4`);
@@ -154,16 +165,18 @@ export async function renderClip(
   // layout timeline), read above. This adds the render inputs to the same
   // file, so there is one artifact per clip explaining one edit rather than
   // two half-explanations.
-  const dur = plan.end - plan.start;
   const composition = {
     schemaVersion: 1,
     clipId,
     compositionType: plan.compositionType ?? null,
     mode: "static-center",
     cameraPath: [{ t: 0, cx: 0.5, cy: 0.5, zoom: 1.0 }],
+    // Phase 12: per-segment effects, chosen by the taste stage against the
+    // composition's own facts. No taste pass (or a malformed response) means
+    // no decorative effect — render.py already treats an empty list as a
+    // no-op crop, so this default is itself a valid, shippable edit.
+    effects: [] as { t0: number; t1: number; template: string; reason?: string }[],
     ...decision,
-    // Phase 12 makes `effects` multi-segment; today one template spans the clip.
-    effects: [{ t0: 0, t1: dur, template: plan.layoutTemplate }],
     // Paths inside the job dir are relative so phase 23 can move the store.
     // Fonts and meme assets are machine-local caches outside it — absolute.
     source: path.relative(jobDir, sourceVideo),

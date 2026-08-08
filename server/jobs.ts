@@ -126,7 +126,6 @@ export interface ClipPlan {
   captionAnimation: CaptionAnimation;
   captionPalette: CaptionPalette;
   captionFont: string;              // Google Fonts family name, AI-chosen
-  layoutTemplate: LayoutTemplate;
   memes: MemeOverlay[];
   monetizationFlag: { risky: boolean; reasons: string[] };
   /**
@@ -158,6 +157,9 @@ export interface EditSummary {
   /** Whole-clip fraction of faces a 9:16 crop keeps whole — phase 29. */
   retention?: Record<string, number>;
   narrowestSafe?: string;
+  /** Per-segment visual effects the taste pass chose — phase 12. */
+  effects?: { t0: number; t1: number; template: string; reason?: string }[];
+  taste?: { applied: boolean; provider?: string; fellBackToRouter: boolean; rejected: { segment: number; why: string }[] };
 }
 
 export interface Job {
@@ -315,6 +317,8 @@ export function hydrateJobFromDisk(job: Job, store: Store) {
               frames: renderArt.frames,
               retention: analysis?.signals?.retention,
               narrowestSafe: analysis?.signals?.narrowestSafe,
+              effects: comp.effects,
+              taste: comp.taste,
             } : undefined,
           });
         }

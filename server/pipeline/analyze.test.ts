@@ -14,7 +14,6 @@ test("sanitizePlan clamps clip duration and timestamps", () => {
 test("sanitizePlan defaults missing enum fields instead of throwing", () => {
   const p = sanitizePlan({ index: 0, start: 0, end: 20 } as any, 100);
   assert.equal(p.contentMode, "funny");
-  assert.equal(p.layoutTemplate, "fullscreen");
   assert.equal(p.captionAnimation, "karaoke-reveal");
   assert.equal(p.captionPalette, "pop-white-red");
   assert.equal(p.captionFont, "Anton");
@@ -24,11 +23,10 @@ test("sanitizePlan defaults missing enum fields instead of throwing", () => {
 
 test("sanitizePlan preserves valid provided values", () => {
   const p = sanitizePlan({
-    index: 0, start: 0, end: 20, contentMode: "gaming", layoutTemplate: "vignette-pulse",
+    index: 0, start: 0, end: 20, contentMode: "gaming",
     monetizationFlag: { risky: true, reasons: ["profanity"] },
   } as any, 100);
   assert.equal(p.contentMode, "gaming");
-  assert.equal(p.layoutTemplate, "vignette-pulse");
   assert.deepEqual(p.monetizationFlag, { risky: true, reasons: ["profanity"] });
 });
 

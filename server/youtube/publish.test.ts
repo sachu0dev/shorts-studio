@@ -22,7 +22,7 @@ const item: QueueItem = { clipId: "clip1", order: 0, channelId: "UC_x", privacyS
 const plan: ClipPlan = {
   index: 1, title: "t", hook: "h", start: 0, end: 1, reason: "", script: "s", hashtags: [],
   thumbnailText: "", thumbnailTimestamp: 0, captions: [], contentMode: "funny",
-  captionAnimation: "typewriter", captionPalette: "hype-yellow", captionFont: "Anton", layoutTemplate: "fullscreen", memes: [],
+  captionAnimation: "typewriter", captionPalette: "hype-yellow", captionFont: "Anton", memes: [],
   monetizationFlag: { risky: false, reasons: [] },
 };
 

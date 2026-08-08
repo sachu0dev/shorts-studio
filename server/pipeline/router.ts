@@ -11,6 +11,7 @@ import {
   type FrameAspect,
 } from "./retention.js";
 import { detectFacecam, type ActionArtifact, type Facecam } from "./gaming.js";
+import type { LayoutTemplate } from "../jobs.js";
 
 export { cropWidthFor } from "./retention.js";
 
@@ -266,6 +267,29 @@ export interface Composition {
   sampleStep?: number;
   /** `gameplay-facecam-stack` / `gameplay-facecam-pip` only — the commentator inset's box, in source-normalized coordinates. */
   facecam?: { x: number; y: number; w: number; h: number };
+  /**
+   * Per-segment visual effects (phase 12) — written by `server/pipeline/taste.ts`
+   * after `buildComposition` returns, never by this function itself. Absent or
+   * empty means no decorative effect, which `render.py` already treats as a
+   * no-op (`fx_fullscreen`), so buildComposition's own output is always a
+   * valid, renderable composition with or without a taste pass.
+   */
+  effects?: EffectWindow[];
+  taste?: TasteMeta;
+}
+
+export interface EffectWindow {
+  t0: number;
+  t1: number;
+  template: LayoutTemplate;
+  reason?: string;
+}
+
+export interface TasteMeta {
+  applied: boolean;
+  provider?: string;
+  rejected: { segment: number; why: string }[];
+  fellBackToRouter: boolean;
 }
 
 /** The published file's fixed dimensions — see `Composition.canvas`. */
