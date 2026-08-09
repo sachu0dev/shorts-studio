@@ -1196,6 +1196,18 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
   await saveJob(job, store);
 }
 
+// SPA fallback — production only (web/dist exists after `npm run build:web`).
+// express.static above already served any real file; anything else that
+// isn't /api or /files is a client-side route (e.g. /jobs/:id) and must get
+// index.html so React Router can render it, or a direct load/refresh 404s.
+// In dev this never fires: Vite's own dev server has its own SPA fallback,
+// and requests only reach here at all if something hit :5177 directly.
+const distIndex = path.join(__dirname, "..", "web", "dist", "index.html");
+app.get(/^\/(?!api\/|files\/).*/, (_req, res) => {
+  if (existsSync(distIndex)) res.sendFile(distIndex);
+  else res.status(404).send("Not found — this is the API server (:5177). In dev, use the Vite URL printed by `npm run dev` instead.");
+});
+
 const PORT = Number(process.env.PORT || 5177);
 const restored = loadJobs(store, STORAGE);
 app.listen(PORT, () => {
