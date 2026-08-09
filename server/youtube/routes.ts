@@ -7,24 +7,30 @@ import { getOAuthConfig, buildAuthUrl, exchangeCode, fetchOwnChannel } from "./o
 
 /**
  * Where `/channels` is actually served. In production Express serves the
- * built SPA itself (`web/dist`), so a relative link works. In dev the SPA
- * only exists on Vite's port (CLAUDE.md: :5173) — Google's redirect always
- * lands back on this server's own port (the registered redirect URI is
- * static), so a relative link here would 404 against a dist build that was
- * never made. This is why the callback below renders real HTML directly
- * instead of a client-side route: it must not depend on the SPA at all.
+ * built SPA itself (`web/dist`), so a relative link works. In dev, Vite owns
+ * the SPA on its OWN port — which is not reliably :5173: Vite bumps to
+ * :5174+ whenever :5173 is already taken, and this server has no way to know
+ * which one a given dev session landed on. Google's redirect always lands
+ * back on THIS server's own port (the registered redirect URI is static), so
+ * guessing a Vite port here has a real chance of linking to a dead tab. Safer
+ * to say so plainly than to guess wrong — this is why the callback below
+ * renders real HTML directly instead of a client-side route in the first
+ * place: it must not depend on the SPA existing at all.
  */
-function channelsPageUrl(): string {
+function channelsPageUrl(): string | null {
   const builtSpaExists = existsSync(path.resolve("web", "dist", "index.html"));
-  return builtSpaExists ? "/channels" : "http://localhost:5173/channels";
+  return builtSpaExists ? "/channels" : null;
 }
 
 function landingPage(ok: boolean, message: string): string {
   const href = channelsPageUrl();
+  const back = href
+    ? `<p><a href="${href}">Back to Channels</a></p>`
+    : `<p>Close this tab and go back to your Shorts Studio tab (the one Vite printed, not this port)${ok ? " — the channel is already linked, just refresh Channels there" : " and try again"}.</p>`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>${ok ? "Channel linked" : "Link failed"}</title>
 <style>body{font:14px system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#e5e5e5}
 main{text-align:center;max-width:28rem;padding:1.5rem}a{color:#e5e5e5}</style></head>
-<body><main><p>${ok ? "✓" : "✕"} ${message}</p><p><a href="${href}">Back to Channels</a></p></main></body></html>`;
+<body><main><p>${ok ? "✓" : "✕"} ${message}</p>${back}</main></body></html>`;
 }
 
 const SETUP_INSTRUCTIONS = [
