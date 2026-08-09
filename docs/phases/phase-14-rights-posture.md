@@ -1,5 +1,10 @@
 # Phase 14 — Rights posture tagging
 
+> **Removed.** This phase was built and passed its gates, then fully reverted
+> at explicit user request — every job can auto-publish now, no
+> owned/licensed/third-party distinction anywhere in the app. Kept here as a
+> historical record; nothing on this page describes current behavior.
+
 **Goal:** every job carries an explicit rights posture, and `third-party` content
 is structurally incapable of auto-publishing.
 

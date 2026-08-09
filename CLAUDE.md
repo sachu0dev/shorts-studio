@@ -6,11 +6,13 @@ refine it until its gate passes, then start the next.**
 
 **What to build next lives in the execution queue in
 `docs/phases/README.md` — take the topmost unbuilt row. Phase numbers are file
-IDs, not a schedule; never pick the next phase by number.** Phases 0–13, 14,
-24, 28–33 are built (framing correctness is done; rights posture, the
-multi-channel upload queue, source catalog/telemetry, and the operations
-dashboard were pulled forward at explicit request; 13 is thumbnail-selection
-half only — caption styling deferred at user request). Phase 15 is superseded
+IDs, not a schedule; never pick the next phase by number.** Phases 0–13, 24,
+28–33 are built (framing correctness is done; the multi-channel upload queue,
+source catalog/telemetry, and the operations dashboard were pulled forward at
+explicit request; 13 is thumbnail-selection half only — caption styling
+deferred at user request). **Phase 14 (rights posture) was built, then fully
+removed at explicit user request — every job can auto-publish now, no
+owned/licensed/third-party gate anywhere in the app.** Phase 15 is superseded
 by 33. Phases 16 (done), 17/18 (skipped — no consumer without Content Hunt),
 19–23, and 25–27 are not being built this pass, at user request.
 
@@ -81,8 +83,9 @@ Everything downstream follows from the 6 GB ceiling:
 4. **Stages are idempotent.** Re-running with identical inputs returns cached output.
 5. **Never block a render on an optional service.** Giphy, Google Fonts, and the
    LLM taste layer all already fail soft — keep that property.
-6. **Rights posture is structural.** When publishing lands, `third-party` content
-   must be rejected by the publish adapter itself, not by documentation.
+6. ~~Rights posture is structural.~~ Removed at explicit user request — every
+   job can now auto-publish, no owned/licensed/third-party distinction. Number
+   kept unused rather than renumbering 7 and every "rule 7" reference to it.
 7. **Instrument from the first commit of every stage** — stage name, wall time,
    peak VRAM, input duration. The laptop's bottleneck is not where you think.
 

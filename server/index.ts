@@ -31,11 +31,11 @@ import { summarizeRetention } from "./pipeline/retention.js";
 import { runPythonStage } from "./pipeline/python.js";
 import { runSystemCheck } from "./systemCheck.js";
 import { uploadClipToYouTube } from "./youtube/uploader.js";
-import { assertPublishable } from "./rights.js";
 import { channelsRouter } from "./youtube/routes.js";
-import { getChannel } from "./youtube/channels.js";
+import { getChannel, getAccessToken } from "./youtube/channels.js";
 import { publishQueueItem } from "./youtube/publish.js";
-import { buildQueue, readQueue, writeQueue, type QueueMode, type QueueItem } from "./uploadQueue.js";
+import { updatePublishAt } from "./youtube/upload.js";
+import { buildQueue, readQueue, writeQueue, regenerateStaleSchedule, type QueueMode, type QueueItem } from "./uploadQueue.js";
 import { LocalStore, type Artifact } from "./artifacts.js";
 import { runStage, type Stage, type StageCtx } from "./stages.js";
 import {
@@ -89,23 +89,14 @@ app.post("/api/jobs", uploadMiddleware(STORAGE), (req: any, res) => {
   // run locally on code-switched speech, and needs no GPU at all.
   const transcriptSource: TranscriptSource =
     req.body.transcriptSource === "whisper" ? "whisper" : "captions";
-  // Phase 14 gate 1: no default. Submitting without an explicit choice is
-  // rejected, not silently treated as anything — forcing the choice at
-  // ingest is the whole point of the rights gate (CLAUDE.md rule 6).
-  const rightsPosture = req.body.rightsPosture as string | undefined;
 
   if (!url && !filePath) return res.status(400).json({ error: "Provide a video URL or upload a file" });
 
   const missing = missingKey(aiProvider);
   if (missing) return res.status(400).json({ error: `${missing} missing in .env — required for ${aiProvider}` });
 
-  if (rightsPosture !== "owned" && rightsPosture !== "licensed" && rightsPosture !== "third-party") {
-    return res.status(400).json({ error: "rightsPosture is required: 'owned', 'licensed', or 'third-party'" });
-  }
-
   const job = createJob({
     url, filePath, clipCount, aiProvider, description, controversialMode, transcriptSource,
-    rights: { posture: rightsPosture, declaredAt: Date.now(), declaredBy: "user" },
   });
   start(job);
   res.json({ id: job.id });
@@ -219,13 +210,6 @@ app.post("/api/jobs/:id/clips/:index/upload-youtube", async (req, res) => {
   if (!job) return res.status(404).json({ error: "unknown job" });
   hydrateJobFromDisk(job, store);
 
-  // First line, before any network call (CLAUDE.md rule 6) — phase 14.
-  try {
-    assertPublishable(job);
-  } catch (e: any) {
-    return res.status(403).json({ error: e?.message || "third-party content cannot auto-publish" });
-  }
-
   const clipIndex = Number(req.params.index);
   const plan = job.plans?.find((p) => p.index === clipIndex);
   if (!plan) return res.status(404).json({ error: `clip plan #${clipIndex} not found` });
@@ -300,7 +284,16 @@ app.get("/api/jobs/:id/upload-queue", async (req, res) => {
   res.json(queue);
 });
 
-/** Reorders and/or edits items (release time, channel) already in the queue. */
+/**
+ * Reorders and/or edits items (release time, channel) already in the queue.
+ * A `publishAt` edit on an item that already has a `videoId` (already live
+ * on YouTube as scheduled/uploaded) is pushed to YouTube itself via
+ * `videos.update` — otherwise the local record and the real schedule drift
+ * apart, which is exactly the bug that prompted this endpoint to do more
+ * than write JSON. If that push fails (e.g. the channel's token predates the
+ * `youtube.force-ssl` scope), the item's local time is left untouched and
+ * the failure is reported back rather than silently applied.
+ */
 app.patch("/api/jobs/:id/upload-queue", async (req, res) => {
   const job = getJob(req.params.id);
   if (!job) return res.status(404).json({ error: "unknown job" });
@@ -310,19 +303,33 @@ app.patch("/api/jobs/:id/upload-queue", async (req, res) => {
   const edits = req.body?.items as Partial<QueueItem>[] | undefined;
   if (!Array.isArray(edits)) return res.status(400).json({ error: "items must be an array" });
 
+  const errors: string[] = [];
   for (const edit of edits) {
     const item = queue.items.find((i) => i.clipId === edit.clipId);
     if (!item) continue;
+
+    if (edit.publishAt !== undefined && edit.publishAt !== item.publishAt && item.videoId) {
+      try {
+        const accessToken = await getAccessToken(item.channelId);
+        await updatePublishAt(accessToken, item.videoId, edit.publishAt);
+      } catch (e: any) {
+        errors.push(`${item.clipId}: couldn't reschedule on YouTube (${e?.message || e})`);
+        continue; // leave this item's local record matching what YouTube actually has
+      }
+    }
+
     // Only fields the dialog can legitimately change — status/videoId/error
     // are written exclusively by the publish step, never by a client edit.
     if (edit.order !== undefined) item.order = edit.order;
     if (edit.channelId !== undefined) item.channelId = edit.channelId;
     if (edit.privacyStatus !== undefined) item.privacyStatus = edit.privacyStatus;
     if (edit.publishAt !== undefined) item.publishAt = edit.publishAt;
+    if (edit.titleOverride !== undefined) item.titleOverride = edit.titleOverride;
+    if (edit.descriptionOverride !== undefined) item.descriptionOverride = edit.descriptionOverride;
   }
   queue.items.sort((a, b) => a.order - b.order);
   await writeQueue(store, queue);
-  res.json(queue);
+  res.json({ ...queue, errors: errors.length ? errors : undefined });
 });
 
 /** Runs the queue, one item at a time, in order. Progress rides the job's existing SSE stream. */
@@ -332,15 +339,16 @@ app.post("/api/jobs/:id/upload-queue/start", async (req, res) => {
   const queue = await readQueue(store, job.id);
   if (!queue) return res.status(404).json({ error: "no upload queue for this job" });
 
-  try {
-    assertPublishable(job);
-  } catch (e: any) {
-    return res.status(403).json({ error: e?.message || "third-party content cannot auto-publish" });
-  }
-
   res.json({ started: true, items: queue.items.length });
 
   const log = (l: string) => progress(job, "Uploading to YouTube", l);
+
+  const regeneratedGapMs = regenerateStaleSchedule(queue);
+  if (regeneratedGapMs !== null) {
+    await writeQueue(store, queue);
+    log(`⏱ release schedule had passed while waiting on YouTube's upload limit — regenerated from now with the original ${Math.round(regeneratedGapMs / 60_000)}min gap`);
+  }
+
   for (const item of [...queue.items].sort((a, b) => a.order - b.order)) {
     if (item.status === "uploaded" || item.status === "scheduled") continue;
     const plan = job.plans?.find((p) => `clip${p.index}` === item.clipId);
@@ -626,9 +634,7 @@ async function runPipeline(job: Job, signal?: AbortSignal) {
         const ytId = normalizeYoutubeId(job.url);
         const sourceId = ytId ? `yt:${ytId}` : null;
         if (sourceId) {
-          const claim = claimSource(catalogDb, {
-            id: sourceId, kind: "youtube", url: job.url, rights: job.rights.posture,
-          });
+          const claim = claimSource(catalogDb, { id: sourceId, kind: "youtube", url: job.url });
           if (!claim.needsDownload && claim.mediaPath && existsSync(claim.mediaPath)) {
             log(`source ${sourceId} already held (${claim.title ?? "no title"}) — skipping download`);
             videoPath = path.join(jobDir, "source.mp4");

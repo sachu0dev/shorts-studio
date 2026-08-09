@@ -153,11 +153,6 @@ export function JobPage({ jobId }: { jobId: string }) {
           <p className="truncate text-sm font-medium">{job.url || job.id}</p>
           <p className="text-xs text-muted-foreground">Job {job.id}</p>
         </div>
-        {job.rights?.posture === "third-party" && (
-          <span className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-500">
-            Draft — third-party, cannot auto-publish
-          </span>
-        )}
       </div>
 
       {/* ── stage tabs ── */}
@@ -333,8 +328,20 @@ export function JobPage({ jobId }: { jobId: string }) {
             <div className="flex items-center gap-2">
               <span className="font-medium">Clips</span>
               <span className="text-muted-foreground">({job.outputs.length})</span>
+              <button
+                onClick={() =>
+                  setSelectedClips(
+                    selectedClips.size === job.outputs!.length
+                      ? new Set()
+                      : new Set(job.outputs!.map((o) => o.plan.index))
+                  )
+                }
+                className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                {selectedClips.size === job.outputs.length ? "Unselect all" : "Select all"}
+              </button>
             </div>
-            {selectedClips.size > 0 && !job.rights?.posture?.includes("third-party") && (
+            {selectedClips.size > 0 && (
               <button
                 onClick={() => setQueueDialogOpen(true)}
                 className="flex items-center gap-1.5 rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-brand-foreground hover:bg-brand/90"
@@ -349,7 +356,6 @@ export function JobPage({ jobId }: { jobId: string }) {
                 key={i}
                 output={o}
                 jobId={job.id}
-                thirdParty={job.rights?.posture === "third-party"}
                 selected={selectedClips.has(o.plan.index)}
                 onToggleSelected={() => toggleClipSelected(o.plan.index)}
               />
@@ -393,9 +399,9 @@ export function JobPage({ jobId }: { jobId: string }) {
 }
 
 function ClipCard({
-  output, jobId, thirdParty, selected, onToggleSelected,
+  output, jobId, selected, onToggleSelected,
 }: {
-  output: NonNullable<Job["outputs"]>[number]; jobId: string; thirdParty: boolean;
+  output: NonNullable<Job["outputs"]>[number]; jobId: string;
   selected: boolean; onToggleSelected: () => void;
 }) {
   const { plan, edit } = output;
@@ -448,11 +454,9 @@ function ClipCard({
       <div className="flex flex-col gap-0">
         <div className="relative aspect-[9/16] bg-black group">
           <video src={output.clip} controls playsInline className="h-full w-full object-contain" />
-          {!thirdParty && (
-            <label className="absolute top-2 left-2 z-10 flex size-6 items-center justify-center rounded bg-black/70 backdrop-blur">
-              <Checkbox checked={selected} onCheckedChange={onToggleSelected} className="border-white/60 data-[state=checked]:bg-brand data-[state=checked]:border-brand" />
-            </label>
-          )}
+          <label className="absolute top-2 left-2 z-10 flex size-6 items-center justify-center rounded bg-black/70 backdrop-blur">
+            <Checkbox checked={selected} onCheckedChange={onToggleSelected} className="border-white/60 data-[state=checked]:bg-brand data-[state=checked]:border-brand" />
+          </label>
           <div className="absolute top-2 left-9 right-2 flex items-center justify-between gap-1">
             <span className="rounded bg-black/70 backdrop-blur px-2 py-0.5 text-[10px] font-medium text-white">
               {plan.contentMode}{edit?.effects?.length ? ` · ${edit.effects.map((e) => e.template).join("+")}` : ""}
@@ -606,13 +610,6 @@ function ClipCard({
           >
             <YoutubeIcon className="size-4" /> View on YouTube <ExternalLink className="size-3" />
           </a>
-        ) : thirdParty ? (
-          <div
-            title="Third-party content cannot auto-publish (CLAUDE.md rule 6) — download and publish manually instead."
-            className="flex items-center justify-center gap-2 rounded border border-dashed py-1.5 text-xs text-muted-foreground"
-          >
-            Draft only — third-party
-          </div>
         ) : (
           <button
             onClick={handleYouTubeUpload}

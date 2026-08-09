@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { createJob, getSystemCheck } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { AiProvider, TranscriptSource, RightsPosture } from "@/types";
+import type { AiProvider, TranscriptSource } from "@/types";
 
 const PROVIDERS: { value: AiProvider; label: string; sub?: string }[] = [
   { value: "gemini", label: "Gemini", sub: "Flash 2.0 (Fast)" },
@@ -31,9 +31,6 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
   const [description, setDescription] = useState("");
   const [controversialMode, setControversialMode] = useState(false);
   const [transcriptSource, setTranscriptSource] = useState<TranscriptSource>("captions");
-  // No default (phase 14) — a pre-filled choice gets clicked past, which
-  // defeats the point of forcing the decision at ingest.
-  const [rightsPosture, setRightsPosture] = useState<RightsPosture | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ollamaCheck, setOllamaCheck] = useState<{ available: boolean; detail: string } | null>(null);
@@ -62,10 +59,6 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
       setError("Paste a URL or choose a file first.");
       return;
     }
-    if (!rightsPosture) {
-      setError("Choose who owns the rights to this video first.");
-      return;
-    }
     setSubmitting(true);
     setError(null);
     try {
@@ -77,7 +70,6 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
         description: description.trim(),
         controversialMode,
         transcriptSource,
-        rightsPosture,
       });
       onCreated(id);
     } catch (e) {
@@ -142,38 +134,6 @@ export function NewJobPage({ onCreated }: { onCreated: (id: string) => void }) {
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           />
 
-          <div className="flex flex-col gap-2 border-t pt-4">
-            <Label className="text-sm">Rights — who can this be published under?</Label>
-            <RadioGroup
-              value={rightsPosture ?? undefined}
-              onValueChange={(v) => setRightsPosture(v as RightsPosture)}
-              className="gap-2"
-            >
-              <div className="flex items-start gap-2">
-                <RadioGroupItem value="owned" id="rights-owned" className="mt-1" />
-                <Label htmlFor="rights-owned" className="text-sm font-normal leading-snug">
-                  Owned — my own channel
-                </Label>
-              </div>
-              <div className="flex items-start gap-2">
-                <RadioGroupItem value="licensed" id="rights-licensed" className="mt-1" />
-                <Label htmlFor="rights-licensed" className="text-sm font-normal leading-snug">
-                  Licensed — permission, CC license, or a partner agreement
-                </Label>
-              </div>
-              <div className="flex items-start gap-2">
-                <RadioGroupItem value="third-party" id="rights-third-party" className="mt-1" />
-                <Label htmlFor="rights-third-party" className="text-sm font-normal leading-snug">
-                  Third-party — everything else
-                </Label>
-              </div>
-            </RadioGroup>
-            {rightsPosture === "third-party" && (
-              <p className="text-[11px] text-amber-600 dark:text-amber-500">
-                Clips render as usual, but this job cannot auto-publish — it produces a draft only.
-              </p>
-            )}
-          </div>
         </CardContent>
       </Card>
 

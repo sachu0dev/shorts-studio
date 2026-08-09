@@ -15,7 +15,7 @@ These were decided up front and every phase file assumes them:
 | 3 | **India / Hinglish in romanized Latin script** | **No Devanagari work.** Anton + the Google Fonts picker work unchanged. WhisperX transcribes Hindi and romanizes. |
 | 4 | `compositionType` is **measured**, `contentMode` is **LLM-chosen** | Two fields, one owner each. The LLM can never select a layout that's physically impossible. |
 | 5 | **Router frames, effects decorate** — the templates survive as a styling layer | Phase 6 ported 11 of 12 to OpenCV and dropped `speed-ramp`; phase 12 drives them per-segment. |
-| 6 | **Rights posture is per-job**, mix of owned and third-party | Phase 14 exists as its own feature before upload. |
+| 6 | ~~Rights posture is per-job, mix of owned and third-party~~ **Reverted** | Phase 14 was built, then fully removed at explicit user request — every job auto-publishes now. |
 | 7 | **Canvas ≠ window.** The published canvas is always 1080×1920; the *framing window* into the source is 9:16 → 16:9 and changes **per segment within a clip** | Phases 29–31 exist. One clip can open 9:16 on a close-up, widen to 4:3 when the panel enters, and return — the remainder of the tall canvas is filled with blur (default) or black. A wide shot is never shipped as a landscape file: that is not a Short. |
 
 ## Priority
@@ -58,7 +58,7 @@ topmost unbuilt row, and do not infer the order from the numbers.**
 | ✅ | [31 — Panel framing & speaker priority](phase-31-panel-framing.md) | **built** — gates 1/2/4/5/6/7 pass by unit test; gates 3/8 also confirmed on real corpus data (10 real panel clips, none render `static-center`) |
 | ✅ | [11 — Gaming composition](phase-11-gaming.md) | **built** — gates 3/5/6 pass (unit + full suite); gates 1/2/4/7 pass by unit/self-test only, unconfirmed on real gameplay footage (no gaming source available this session) |
 | ✅ | [32 — Multi-channel YouTube OAuth](phase-32-multi-channel-oauth.md) | **built** — pulled forward from phase 26 at explicit request, ahead of phase 33's queue UI so there's a channel to upload to |
-| ✅ | [14 — Rights posture tagging](phase-14-rights-posture.md) | **built** — pulled forward, ahead of phase 33 touching `videos.insert` |
+| ⤫ | [14 — Rights posture tagging](phase-14-rights-posture.md) | **built, then removed** at explicit user request — every job auto-publishes now |
 | ✅ | [33 — Upload queue, drag-drop order, scheduled release](phase-33-upload-queue-scheduling.md) | **built** — pulled forward at explicit request; supersedes phase 15's single-clip flow (`uploader.ts` untouched behaviourally, refactored to share `upload.ts`'s resumable-upload primitive) |
 | ✅ | [12 — LLM taste layer](phase-12-llm-taste.md) | **built** — per-segment effects, `layoutTemplate` removed |
 | ✅ | [13 — Caption polish + thumbnail](phase-13-caption-polish.md) | **built** — thumbnail-selection half only; caption styling explicitly deferred at user request |
@@ -148,7 +148,7 @@ on Block A's measured behaviour is marked `[revisit]`.
 | [12](phase-12-llm-taste.md) | LLM taste layer (per-segment) | A | **built** — `ClipPlan.layoutTemplate` removed, replaced by per-segment `effects[]` from `taste/<clipId>.json`, merged onto the router's composition at render time; malformed/unreachable LLM response falls back to the router timeline (proven by test, not just by code reading); gate 4 ("visible improvement side-by-side") not measured against real corpus output this session |
 | [13](phase-13-caption-polish.md) | Caption polish + best-frame thumbnail | A | **built** — thumbnail-selection half only, caption styling explicitly deferred at user request; `worker/stages/thumbnail.py` scores real frames (face size × confidence × sharpness − off-center penalty, screen-rec prefers phase 11's action-confidence instead); no eyesOpenBonus term (no landmark model in this pipeline) — named as a ponytail cut, not silently dropped |
 | [32](phase-32-multi-channel-oauth.md) | Multi-channel YouTube OAuth | B | **built** — real OAuth flow verified live against Google's consent endpoint; a real end-to-end channel link (through Google's login) not exercised this session |
-| [14](phase-14-rights-posture.md) | Rights posture tagging | B | **built** — all gates pass; `assertPublishable` also wired into the pre-existing temporary upload endpoint, not just the new adapter |
+| [14](phase-14-rights-posture.md) | Rights posture tagging | B | **removed** — built and all gates passed, then the whole gate (`server/rights.ts`, the New-job rights picker, the upload block) was deleted at explicit user request; every job can auto-publish |
 | [15](phase-15-youtube-upload.md) | YouTube OAuth + upload | B | superseded by 33 (multi-channel, batched); `uploader.ts` kept working as-is, refactored to share `upload.ts`'s resumable-upload primitive |
 | [33](phase-33-upload-queue-scheduling.md) | Upload queue, drag-drop order, scheduled release | B | **built** — gates 3/4/5 pass by test; gates 1/2 (a real staggered release actually going public on YouTube) need a linked channel + real clips to exercise, not done this session |
 | [16](phase-16-local-provider.md) | Local model provider (Ollama) | C | planned |

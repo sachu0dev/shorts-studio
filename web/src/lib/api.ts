@@ -1,5 +1,5 @@
 import type {
-  Job, SystemCheckReport, AiProvider, TranscriptSource, RightsPosture, Channel, UploadQueue, QueueMode, QueueItem,
+  Job, SystemCheckReport, AiProvider, TranscriptSource, Channel, UploadQueue, QueueMode, QueueItem,
   DashRuns, DashLibrary, DashChannels, DashUnavailable,
 } from "@/types";
 
@@ -24,7 +24,6 @@ export interface CreateJobInput {
   description: string;
   controversialMode: boolean;
   transcriptSource: TranscriptSource;
-  rightsPosture: RightsPosture;
 }
 
 export async function createJob(input: CreateJobInput): Promise<{ id: string }> {
@@ -36,7 +35,6 @@ export async function createJob(input: CreateJobInput): Promise<{ id: string }> 
     fd.append("description", input.description);
     fd.append("controversialMode", String(input.controversialMode));
     fd.append("transcriptSource", input.transcriptSource);
-    fd.append("rightsPosture", input.rightsPosture);
     fd.append("video", input.file);
     res = await fetch("/api/jobs", { method: "POST", body: fd });
   } else {
@@ -50,7 +48,6 @@ export async function createJob(input: CreateJobInput): Promise<{ id: string }> 
         description: input.description,
         controversialMode: input.controversialMode,
         transcriptSource: input.transcriptSource,
-        rightsPosture: input.rightsPosture,
       }),
     });
   }

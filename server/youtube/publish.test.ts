@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { publishQueueItem } from "./publish.js";
+import { publishQueueItem, buildUpload, PROMO_FOOTER } from "./publish.js";
 import { createJob } from "../jobs.js";
 import type { QueueItem } from "../uploadQueue.js";
 import type { ClipPlan } from "../jobs.js";
@@ -26,25 +26,35 @@ const plan: ClipPlan = {
   monetizationFlag: { risky: false, reasons: [] },
 };
 
-test("publishQueueItem: assertPublishable is called before any store access or network call for third-party", async () => {
-  const job = createJob({
-    url: "https://youtu.be/x", clipCount: 1, aiProvider: "gemini", description: "",
-    rights: { posture: "third-party", declaredAt: Date.now(), declaredBy: "user" },
-  });
-  const store = fakeStore();
-
-  await assert.rejects(() => publishQueueItem(job, item, plan, "/tmp/video.mp4", undefined, store, () => {}));
-  assert.deepEqual(store.calls, [], "a call was made before the rights gate threw");
-});
-
 test("publishQueueItem: an already-uploaded item is skipped without touching the store again", async () => {
   const job = createJob({
     url: "https://youtu.be/x", clipCount: 1, aiProvider: "gemini", description: "",
-    rights: { posture: "owned", declaredAt: Date.now(), declaredBy: "user" },
   });
   const store = fakeStore();
   const done: QueueItem = { ...item, status: "uploaded", videoId: "abc123" };
 
   await publishQueueItem(job, done, plan, "/tmp/video.mp4", undefined, store, () => {});
   assert.deepEqual(store.calls, [], "an already-uploaded item should skip before touching the store");
+});
+
+test("buildUpload: no override uses the plan's title/script, footer always appended", () => {
+  const { title, description } = buildUpload(item, plan);
+  assert.equal(title, "t");
+  assert.ok(description.startsWith("s"), "falls back to plan.script when there's no override");
+  assert.ok(description.endsWith(PROMO_FOOTER), "the promo footer is always the last thing in the description");
+});
+
+test("buildUpload: title/description overrides win, footer still appended", () => {
+  const overridden: QueueItem = { ...item, titleOverride: "My Title", descriptionOverride: "My own description" };
+  const { title, description } = buildUpload(overridden, plan);
+  assert.equal(title, "My Title");
+  assert.ok(description.startsWith("My own description"));
+  assert.ok(description.endsWith(PROMO_FOOTER), "an override does not skip the footer");
+});
+
+test("buildUpload: a blank/whitespace-only override falls back to the plan default", () => {
+  const blank: QueueItem = { ...item, titleOverride: "   ", descriptionOverride: "  " };
+  const { title, description } = buildUpload(blank, plan);
+  assert.equal(title, "t");
+  assert.ok(description.startsWith("s"));
 });

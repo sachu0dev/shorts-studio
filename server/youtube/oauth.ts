@@ -3,12 +3,14 @@
  * no route handling, no storage — so `channels.ts` and `routes.ts` each own
  * one concern.
  *
- * Scopes are `youtube.upload` (already used by the temporary single-channel
- * uploader) plus `youtube.readonly`, added only to read the linked channel's
- * own snippet/thumbnail at link time — still account-scoped, not a wider grant.
+ * `youtube.force-ssl` covers everything `youtube.upload` did (insert) plus
+ * `videos.update` — needed to reschedule an already-uploaded video's
+ * `publishAt` without re-uploading it — and `youtube.readonly`, to read the
+ * linked channel's own snippet/thumbnail at link time. Still account-scoped,
+ * not a wider grant than the app actually uses.
  */
 export const YOUTUBE_SCOPES = [
-  "https://www.googleapis.com/auth/youtube.upload",
+  "https://www.googleapis.com/auth/youtube.force-ssl",
   "https://www.googleapis.com/auth/youtube.readonly",
 ].join(" ");
 

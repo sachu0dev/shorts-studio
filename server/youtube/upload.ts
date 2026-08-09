@@ -60,6 +60,16 @@ export async function insertVideo(accessToken: string, videoPath: string, meta: 
   return result.id;
 }
 
+/** Reschedules an already-uploaded private video's auto-publish time. */
+export async function updatePublishAt(accessToken: string, videoId: string, publishAt: string): Promise<void> {
+  const res = await fetch("https://www.googleapis.com/youtube/v3/videos?part=status", {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ id: videoId, status: { privacyStatus: "private", publishAt } }),
+  });
+  if (!res.ok) throw new Error(`failed to update publish time: ${res.status} ${await res.text()}`);
+}
+
 export async function setThumbnail(accessToken: string, videoId: string, thumbnailPath: string): Promise<void> {
   const res = await fetch(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${encodeURIComponent(videoId)}`, {
     method: "POST",

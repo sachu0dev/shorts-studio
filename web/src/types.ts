@@ -4,8 +4,6 @@
 export type AiProvider = "anthropic" | "openai" | "gemini" | "ollama" | "groq" | "openrouter" | "cerebras";
 /** Which text the pipeline trusts first; the other is always the fallback. */
 export type TranscriptSource = "captions" | "whisper";
-/** No default anywhere on purpose (phase 14) — forcing the choice is the point. */
-export type RightsPosture = "owned" | "licensed" | "third-party";
 export type JobStatus = "queued" | "running" | "done" | "error";
 
 export interface ClipPlan {
@@ -88,14 +86,6 @@ export interface StageTiming {
   cached?: boolean;
 }
 
-export interface RightsDeclaration {
-  posture: RightsPosture;
-  declaredAt: number;
-  declaredBy: "user";
-  ccFlagFromApi?: boolean;
-  note?: string;
-}
-
 export interface Job {
   id: string;
   url?: string;
@@ -103,7 +93,6 @@ export interface Job {
   aiProvider: AiProvider;
   description: string;
   controversialMode: boolean;
-  rights: RightsDeclaration;
   status: JobStatus;
   stage: string;
   log: string[];
@@ -134,6 +123,8 @@ export interface QueueItem {
   channelId: string;
   privacyStatus: QueuePrivacy;
   publishAt?: string;
+  titleOverride?: string;
+  descriptionOverride?: string;
   status: QueueItemStatus;
   videoId?: string;
   error?: string;
@@ -143,6 +134,8 @@ export interface UploadQueue {
   jobId: string;
   items: QueueItem[];
   createdAt: number;
+  /** Set when a PATCH edit couldn't be pushed to YouTube (e.g. rescheduling an already-live video) — the local record for that item is left unchanged. */
+  errors?: string[];
 }
 
 export type CheckStatus = "ok" | "warn" | "error";
